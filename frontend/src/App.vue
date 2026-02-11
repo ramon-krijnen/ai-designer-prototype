@@ -22,7 +22,7 @@ function closeLightbox() {
 <template>
   <main class="app-shell">
     <section class="panel">
-      <h1>AI Image Playground</h1>
+      <h1>Flexible AI Research Tool (FART)</h1>
       <p class="subtitle">Generate images, then browse complete run history in Archive.</p>
 
       <div class="tabs" role="tablist" aria-label="Image tools">

@@ -4,7 +4,6 @@ import base64
 import hashlib
 import json
 import sqlite3
-from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -43,6 +42,7 @@ class ImageStore:
                     image_path TEXT NOT NULL,
                     mime_type TEXT NOT NULL,
                     sha256 TEXT NOT NULL,
+                    image_base64 TEXT NOT NULL,
                     request_json TEXT NOT NULL,
                     response_json TEXT NOT NULL
                 )
@@ -62,6 +62,27 @@ class ImageStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_image_generations_run_id ON image_generations(run_id)"
             )
+            if "image_base64" not in columns:
+                conn.execute("ALTER TABLE image_generations ADD COLUMN image_base64 TEXT")
+                rows = conn.execute(
+                    """
+                    SELECT id, image_path, response_json
+                    FROM image_generations
+                    WHERE image_base64 IS NULL OR image_base64 = ''
+                    """
+                ).fetchall()
+                backfill_rows = []
+                for row in rows:
+                    image_base64 = self._extract_image_base64_from_response_json(row["response_json"])
+                    if image_base64 is None:
+                        image_base64 = self._read_image_file_base64(row["image_path"])
+                    if image_base64 is not None:
+                        backfill_rows.append((image_base64, row["id"]))
+                if backfill_rows:
+                    conn.executemany(
+                        "UPDATE image_generations SET image_base64 = ? WHERE id = ?",
+                        backfill_rows,
+                    )
 
     def save_generation(
         self,
@@ -91,8 +112,9 @@ class ImageStore:
             "image_path": str(image_path),
             "mime_type": "image/png",
             "sha256": image_hash,
+            "image_base64": result.image_base64,
             "request_json": json.dumps(request_payload, ensure_ascii=True),
-            "response_json": json.dumps(asdict(result), ensure_ascii=True),
+            "response_json": json.dumps(self._extract_response_fields(result), ensure_ascii=True),
         }
 
         with self._connect() as conn:
@@ -100,10 +122,10 @@ class ImageStore:
                 """
                 INSERT INTO image_generations (
                     id, run_id, created_at, provider, model, prompt, revised_prompt,
-                    size, quality, image_path, mime_type, sha256, request_json, response_json
+                    size, quality, image_path, mime_type, sha256, image_base64, request_json, response_json
                 ) VALUES (
                     :id, :run_id, :created_at, :provider, :model, :prompt, :revised_prompt,
-                    :size, :quality, :image_path, :mime_type, :sha256, :request_json, :response_json
+                    :size, :quality, :image_path, :mime_type, :sha256, :image_base64, :request_json, :response_json
                 )
                 """,
                 row,
@@ -130,7 +152,7 @@ class ImageStore:
             row = conn.execute(
                 """
                 SELECT id, run_id, created_at, provider, model, prompt, revised_prompt, size, quality,
-                       image_path, mime_type, sha256, request_json, response_json
+                       image_path, mime_type, sha256, image_base64, request_json, response_json
                 FROM image_generations
                 WHERE id = ?
                 """,
@@ -141,8 +163,10 @@ class ImageStore:
             return None
 
         record = dict(row)
-        record["request_json"] = json.loads(record["request_json"])
-        record["response_json"] = json.loads(record["response_json"])
+        record["request_json"] = self._load_json(record.get("request_json"), default={})
+        record["response_json"] = self._load_json(record.get("response_json"), default={})
+        if not record["response_json"]:
+            record["response_json"] = self._extract_response_fields_from_record(record)
         return record
 
     def image_file_path(self, image_id: str) -> Path | None:
@@ -221,3 +245,65 @@ class ImageStore:
                 }
             )
         return runs
+
+    @staticmethod
+    def _load_json(value: str | None, default: dict[str, Any]) -> dict[str, Any]:
+        if not value:
+            return default
+        try:
+            loaded = json.loads(value)
+            if isinstance(loaded, dict):
+                return loaded
+        except json.JSONDecodeError:
+            pass
+        return default
+
+    @staticmethod
+    def _extract_response_fields(result: ImageGenerationResult) -> dict[str, Any]:
+        return {
+            "provider": result.provider,
+            "model": result.model,
+            "prompt": result.prompt,
+            "revised_prompt": result.revised_prompt,
+            "size": result.size,
+            "quality": result.quality,
+        }
+
+    @staticmethod
+    def _extract_response_fields_from_record(record: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "provider": record.get("provider"),
+            "model": record.get("model"),
+            "prompt": record.get("prompt"),
+            "revised_prompt": record.get("revised_prompt"),
+            "size": record.get("size"),
+            "quality": record.get("quality"),
+        }
+
+    @staticmethod
+    def _extract_image_base64_from_response_json(response_json: str | None) -> str | None:
+        if not response_json:
+            return None
+        try:
+            payload = json.loads(response_json)
+        except json.JSONDecodeError:
+            return None
+        if isinstance(payload, dict):
+            image_base64 = payload.get("image_base64")
+            if isinstance(image_base64, str):
+                trimmed = image_base64.strip()
+                return trimmed or None
+        return None
+
+    @staticmethod
+    def _read_image_file_base64(image_path: str | None) -> str | None:
+        if not image_path:
+            return None
+        path = Path(image_path)
+        if not path.exists():
+            return None
+        try:
+            image_bytes = path.read_bytes()
+        except OSError:
+            return None
+        return base64.b64encode(image_bytes).decode("ascii")
