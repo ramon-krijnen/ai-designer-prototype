@@ -5,20 +5,61 @@ const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').trim()
 
 const prompt = ref('')
 const isLoading = ref(false)
+const isLoadingExisting = ref(false)
 const error = ref('')
 const images = ref([])
 const revisedPrompt = ref('')
+const debugLimit = ref(4)
+const resultSource = ref('none')
 
 const imageCount = computed(() => images.value.length)
+const isBusy = computed(() => isLoading.value || isLoadingExisting.value)
 
 function normalizeImageSource(value, mimeType = 'image/png') {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   if (!trimmed) return null
-  if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('data:')) {
+
+  // Keep absolute and browser-native URL schemes unchanged.
+  if (
+    trimmed.startsWith('http://') ||
+    trimmed.startsWith('https://') ||
+    trimmed.startsWith('data:') ||
+    trimmed.startsWith('blob:')
+  ) {
     return trimmed
   }
-  return `data:${mimeType};base64,${trimmed}`
+
+  // Support API responses that return root-relative paths such as /api/images/<id>/file.
+  if (trimmed.startsWith('/')) {
+    return API_BASE_URL ? `${API_BASE_URL}${trimmed}` : trimmed
+  }
+
+  // If an API base URL is configured and we got a relative path, resolve it against that base.
+  if (API_BASE_URL && (trimmed.startsWith('./') || trimmed.startsWith('../'))) {
+    try {
+      return new URL(trimmed, `${API_BASE_URL}/`).toString()
+    } catch {
+      return null
+    }
+  }
+
+  // Fallback to raw base64 payloads.
+  if (/^[A-Za-z0-9+/=\s]+$/.test(trimmed)) {
+    return `data:${mimeType};base64,${trimmed}`
+  }
+
+  // Unknown format.
+  return null
+}
+
+function dedupeImages(items) {
+  const seen = new Set()
+  return items.filter((item) => {
+    if (!item?.src || seen.has(item.src)) return false
+    seen.add(item.src)
+    return true
+  })
 }
 
 function parseImageCandidate(candidate, index) {
@@ -42,6 +83,26 @@ function parseImageCandidate(candidate, index) {
   return { src, alt: candidate.alt || `Generated image ${index + 1}` }
 }
 
+function formatTimestamp(value) {
+  if (!value) return ''
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return ''
+  return parsed.toLocaleString()
+}
+
+function parseStoredImageRecord(record, index) {
+  if (!record || typeof record !== 'object') return null
+  const parsed = parseImageCandidate(record, index)
+  if (!parsed) return null
+
+  return {
+    ...parsed,
+    prompt: typeof record.prompt === 'string' ? record.prompt.trim() : '',
+    provider: typeof record.provider === 'string' ? record.provider.trim() : '',
+    createdAt: formatTimestamp(record.created_at),
+  }
+}
+
 function extractImages(payload) {
   const candidates = []
 
@@ -52,18 +113,17 @@ function extractImages(payload) {
   if (payload?.image_base64) candidates.push(payload.image_base64)
   if (payload?.b64_json) candidates.push(payload.b64_json)
 
-  return candidates
-    .map((item, index) => parseImageCandidate(item, index))
-    .filter(Boolean)
+  return dedupeImages(candidates.map((item, index) => parseImageCandidate(item, index)).filter(Boolean))
 }
 
 async function generateImages() {
   const trimmedPrompt = prompt.value.trim()
-  if (!trimmedPrompt || isLoading.value) return
+  if (!trimmedPrompt || isBusy.value) return
 
   isLoading.value = true
   error.value = ''
   revisedPrompt.value = ''
+  resultSource.value = 'generate'
   images.value = []
 
   try {
@@ -93,6 +153,39 @@ async function generateImages() {
     isLoading.value = false
   }
 }
+
+async function loadExistingImages() {
+  if (isBusy.value) return
+
+  isLoadingExisting.value = true
+  error.value = ''
+  revisedPrompt.value = ''
+  resultSource.value = 'existing'
+  images.value = []
+
+  try {
+    const response = await fetch(`${API_BASE_URL}/api/images?limit=${debugLimit.value}&offset=0`)
+    const payload = await response.json().catch(() => [])
+
+    if (!response.ok) {
+      throw new Error(payload.error || payload.details || 'Failed to load existing images.')
+    }
+
+    if (!Array.isArray(payload)) {
+      throw new Error('Unexpected response when loading existing images.')
+    }
+
+    images.value = dedupeImages(payload.map((item, index) => parseStoredImageRecord(item, index)).filter(Boolean))
+
+    if (!images.value.length) {
+      throw new Error('No stored images found in the database yet.')
+    }
+  } catch (requestError) {
+    error.value = requestError instanceof Error ? requestError.message : 'Unexpected error.'
+  } finally {
+    isLoadingExisting.value = false
+  }
+}
 </script>
 
 <template>
@@ -108,12 +201,25 @@ async function generateImages() {
           v-model="prompt"
           placeholder="e.g. A futuristic city skyline at sunrise, cinematic lighting"
           rows="4"
-          :disabled="isLoading"
+          :disabled="isBusy"
         />
-        <button type="submit" :disabled="isLoading || !prompt.trim()">
+        <button type="submit" :disabled="isBusy || !prompt.trim()">
           {{ isLoading ? 'Generating...' : 'Generate Images' }}
         </button>
       </form>
+
+      <div class="debug-tools">
+        <label for="debug-count">Debug from DB</label>
+        <select id="debug-count" v-model.number="debugLimit" :disabled="isBusy">
+          <option :value="1">1 image</option>
+          <option :value="4">4 images</option>
+          <option :value="8">8 images</option>
+          <option :value="16">16 images</option>
+        </select>
+        <button type="button" class="secondary" :disabled="isBusy" @click="loadExistingImages">
+          {{ isLoadingExisting ? 'Loading...' : 'Load Existing Images' }}
+        </button>
+      </div>
 
       <p v-if="error" class="message error">{{ error }}</p>
       <p v-else-if="revisedPrompt" class="message info">Revised prompt: {{ revisedPrompt }}</p>
@@ -122,16 +228,27 @@ async function generateImages() {
     <section class="results">
       <div class="results-header">
         <h2>Results</h2>
-        <span v-if="imageCount">{{ imageCount }} image{{ imageCount === 1 ? '' : 's' }}</span>
+        <span v-if="imageCount">
+          {{ imageCount }} image{{ imageCount === 1 ? '' : 's' }}
+          <template v-if="resultSource === 'existing'"> from DB</template>
+        </span>
       </div>
 
-      <p v-if="!imageCount && !isLoading" class="empty-state">
+      <p v-if="!imageCount && !isBusy" class="empty-state">
         No images yet. Submit a prompt to get started.
       </p>
 
       <div v-if="imageCount" class="image-grid">
         <article v-for="(image, index) in images" :key="`${image.src}-${index}`" class="image-card">
           <img :src="image.src" :alt="image.alt" loading="lazy" />
+          <div v-if="image.prompt || image.provider || image.createdAt" class="image-meta">
+            <p v-if="image.prompt" class="image-prompt">{{ image.prompt }}</p>
+            <p v-if="image.provider || image.createdAt" class="image-details">
+              <span v-if="image.provider">{{ image.provider }}</span>
+              <span v-if="image.provider && image.createdAt"> · </span>
+              <span v-if="image.createdAt">{{ image.createdAt }}</span>
+            </p>
+          </div>
         </article>
       </div>
     </section>
@@ -171,6 +288,27 @@ h1 {
   gap: 0.75rem;
 }
 
+.debug-tools {
+  margin-top: 0.8rem;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.debug-tools label {
+  color: #203a67;
+  font-weight: 600;
+}
+
+.debug-tools select {
+  border: 1px solid #b9c9e3;
+  border-radius: 8px;
+  padding: 0.4rem 0.55rem;
+  font: inherit;
+  background: #ffffff;
+}
+
 .prompt-label {
   font-weight: 600;
   color: #203a67;
@@ -205,6 +343,17 @@ button {
 button:disabled {
   background: #7894c0;
   cursor: not-allowed;
+}
+
+button.secondary {
+  background: #eaf1ff;
+  color: #194790;
+  border: 1px solid #b9c9e3;
+}
+
+button.secondary:disabled {
+  background: #f2f5fb;
+  color: #7f92b4;
 }
 
 .message {
@@ -259,6 +408,24 @@ h2 {
   display: block;
   aspect-ratio: 1 / 1;
   object-fit: cover;
+}
+
+.image-meta {
+  padding: 0.65rem 0.75rem 0.75rem;
+  background: #ffffff;
+}
+
+.image-prompt {
+  margin: 0;
+  color: #163869;
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
+.image-details {
+  margin: 0.45rem 0 0;
+  color: #58719b;
+  font-size: 0.8rem;
 }
 
 @media (min-width: 860px) {
