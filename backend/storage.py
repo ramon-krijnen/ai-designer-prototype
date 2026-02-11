@@ -171,27 +171,36 @@ class ImageStore:
                 (limit, offset),
             ).fetchall()
 
-            runs: list[dict[str, Any]] = []
-            for row in run_rows:
-                run_id = row["run_id"]
-                image_rows = conn.execute(
-                    """
-                    SELECT id, run_id, created_at, provider, model, prompt, revised_prompt, size, quality,
-                           image_path, mime_type, sha256
-                    FROM image_generations
-                    WHERE run_id = ?
-                    ORDER BY created_at ASC
-                    """,
-                    (run_id,),
-                ).fetchall()
+            if not run_rows:
+                return []
 
-                runs.append(
-                    {
-                        "run_id": run_id,
-                        "created_at": row["created_at"],
-                        "image_count": row["image_count"],
-                        "images": [dict(image_row) for image_row in image_rows],
-                    }
-                )
+            run_ids = [row["run_id"] for row in run_rows]
+            placeholders = ",".join("?" for _ in run_ids)
+            image_rows = conn.execute(
+                f"""
+                SELECT id, run_id, created_at, provider, model, prompt, revised_prompt, size, quality,
+                       image_path, mime_type, sha256
+                FROM image_generations
+                WHERE run_id IN ({placeholders})
+                ORDER BY created_at ASC
+                """,
+                run_ids,
+            ).fetchall()
 
+        images_by_run: dict[str, list[dict[str, Any]]] = {run_id: [] for run_id in run_ids}
+        for image_row in image_rows:
+            image = dict(image_row)
+            images_by_run[image["run_id"]].append(image)
+
+        runs: list[dict[str, Any]] = []
+        for row in run_rows:
+            run_id = row["run_id"]
+            runs.append(
+                {
+                    "run_id": run_id,
+                    "created_at": row["created_at"],
+                    "image_count": row["image_count"],
+                    "images": images_by_run.get(run_id, []),
+                }
+            )
         return runs
