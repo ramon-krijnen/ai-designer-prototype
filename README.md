@@ -32,6 +32,7 @@ cp .env.example .env
 
 Update `backend/.env` with provider keys you use (`OPENAI_API_KEY` and/or `KREA_API_KEY`).
 For Krea async jobs you can tune `KREA_POLL_INTERVAL_SECONDS` and `KREA_JOB_TIMEOUT_SECONDS`.
+If Krea returns image URLs on additional hosts/CDNs, set `KREA_IMAGE_HOST_ALLOWLIST` as a comma-separated host list.
 
 Run the backend:
 

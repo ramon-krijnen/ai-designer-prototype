@@ -45,6 +45,7 @@ class KreaImageProvider:
         self._base_url = os.getenv("KREA_API_BASE_URL", "https://api.krea.ai").rstrip("/")
         self._default_model_alias = self.OPTIONS["default_model"]
         self._user_agent = os.getenv("KREA_USER_AGENT", "ai-designer-prototype/1.0")
+        self._trusted_download_hosts = self._resolve_trusted_download_hosts()
 
     def generate(self, request: ImageGenerationRequest) -> ImageGenerationResult:
         model_alias = (request.model or self._default_model_alias).strip()
@@ -289,6 +290,7 @@ class KreaImageProvider:
 
         parsed = urlparse(trimmed)
         if parsed.scheme in {"http", "https"}:
+            self._ensure_trusted_download_host(parsed.hostname or "")
             image_bytes = self._download_bytes(trimmed)
             return base64.b64encode(image_bytes).decode("ascii")
 
@@ -298,7 +300,7 @@ class KreaImageProvider:
         request = Request(
             url,
             method="GET",
-            headers=self._base_headers(content_type_json=False),
+            headers=self._download_headers(),
         )
         try:
             with urlopen(request, timeout=60) as response:
@@ -322,3 +324,35 @@ class KreaImageProvider:
         if content_type_json:
             headers["Content-Type"] = "application/json"
         return headers
+
+    def _download_headers(self) -> dict[str, str]:
+        return {
+            "Accept": "*/*",
+            "User-Agent": self._user_agent,
+        }
+
+    def _resolve_trusted_download_hosts(self) -> set[str]:
+        hosts: set[str] = set()
+
+        base_host = (urlparse(self._base_url).hostname or "").lower()
+        if base_host:
+            hosts.add(base_host)
+
+        extra_hosts = os.getenv("KREA_IMAGE_HOST_ALLOWLIST", "")
+        for item in extra_hosts.split(","):
+            host = item.strip().lower()
+            if host:
+                hosts.add(host)
+
+        if not hosts:
+            raise ValueError("Krea trusted image host allowlist is empty")
+
+        return hosts
+
+    def _ensure_trusted_download_host(self, host: str) -> None:
+        normalized_host = host.strip().lower()
+        if normalized_host not in self._trusted_download_hosts:
+            allowed_hosts = ", ".join(sorted(self._trusted_download_hosts))
+            raise RuntimeError(
+                f"Krea image URL host '{normalized_host}' is not trusted. Allowed hosts: {allowed_hosts}"
+            )
