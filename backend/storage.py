@@ -158,6 +158,23 @@ class ImageStore:
             return None
         return path
 
+    def delete_run(self, run_id: str) -> None:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT image_path FROM image_generations WHERE run_id = ?",
+                (run_id,),
+            ).fetchall()
+            conn.execute("DELETE FROM image_generations WHERE run_id = ?", (run_id,))
+
+        for row in rows:
+            image_path = Path(row["image_path"])
+            try:
+                if image_path.exists():
+                    image_path.unlink()
+            except OSError:
+                # Best effort cleanup; DB rows were already removed.
+                continue
+
     def list_runs(self, limit: int = 25, offset: int = 0) -> list[dict[str, Any]]:
         with self._connect() as conn:
             run_rows = conn.execute(

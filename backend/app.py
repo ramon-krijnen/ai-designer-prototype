@@ -128,8 +128,8 @@ def _generate_from_payload(payload: dict[str, Any]) -> tuple[Any, int]:
 
         provider = provider_registry.get(provider_name)
         run_id = str(uuid4())
-        responses = []
         revised_prompt = None
+        generation_results = []
 
         for model_name in models:
             request_for_model = ImageGenerationRequest(
@@ -140,9 +140,22 @@ def _generate_from_payload(payload: dict[str, Any]) -> tuple[Any, int]:
                 steps=generation_request.steps,
             )
             result = provider.generate(request_for_model)
-            saved_record = image_store.save_generation(payload, result, run_id=run_id)
             if revised_prompt is None and result.revised_prompt:
                 revised_prompt = result.revised_prompt
+            generation_results.append(result)
+
+        saved_records = []
+        try:
+            for result in generation_results:
+                saved_records.append(image_store.save_generation(payload, result, run_id=run_id))
+        except Exception as exc:
+            app.logger.exception("Failed to persist image generation run; rolling back")
+            image_store.delete_run(run_id)
+            raise RuntimeError("Failed to persist generated images") from exc
+
+        responses = []
+        for index, result in enumerate(generation_results):
+            saved_record = saved_records[index]
             responses.append(
                 {
                     "provider": result.provider,
