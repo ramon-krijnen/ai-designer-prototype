@@ -1,26 +1,32 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').trim()
 
 const prompt = ref('')
 const isLoading = ref(false)
-const isLoadingExisting = ref(false)
 const error = ref('')
 const images = ref([])
 const revisedPrompt = ref('')
-const debugLimit = ref(4)
-const resultSource = ref('none')
+const activeTab = ref('generate')
+
+const archiveRuns = ref([])
+const archiveError = ref('')
+const isArchiveLoading = ref(false)
+const archiveOffset = ref(0)
+const archivePageSize = 24
+const hasMoreArchive = ref(true)
+const archiveInitialized = ref(false)
 
 const imageCount = computed(() => images.value.length)
-const isBusy = computed(() => isLoading.value || isLoadingExisting.value)
+const archiveCount = computed(() => archiveRuns.value.length)
+const isBusy = computed(() => isLoading.value || isArchiveLoading.value)
 
 function normalizeImageSource(value, mimeType = 'image/png') {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   if (!trimmed) return null
 
-  // Keep absolute and browser-native URL schemes unchanged.
   if (
     trimmed.startsWith('http://') ||
     trimmed.startsWith('https://') ||
@@ -30,12 +36,10 @@ function normalizeImageSource(value, mimeType = 'image/png') {
     return trimmed
   }
 
-  // Support API responses that return root-relative paths such as /api/images/<id>/file.
   if (trimmed.startsWith('/')) {
     return API_BASE_URL ? `${API_BASE_URL}${trimmed}` : trimmed
   }
 
-  // If an API base URL is configured and we got a relative path, resolve it against that base.
   if (API_BASE_URL && (trimmed.startsWith('./') || trimmed.startsWith('../'))) {
     try {
       return new URL(trimmed, `${API_BASE_URL}/`).toString()
@@ -44,12 +48,10 @@ function normalizeImageSource(value, mimeType = 'image/png') {
     }
   }
 
-  // Fallback to raw base64 payloads.
   if (/^[A-Za-z0-9+/=\s]+$/.test(trimmed)) {
     return `data:${mimeType};base64,${trimmed}`
   }
 
-  // Unknown format.
   return null
 }
 
@@ -67,7 +69,6 @@ function parseImageCandidate(candidate, index) {
     const src = normalizeImageSource(candidate)
     return src ? { src, alt: `Generated image ${index + 1}` } : null
   }
-
   if (!candidate || typeof candidate !== 'object') return null
 
   const mimeType = candidate.mime_type || candidate.content_type || 'image/png'
@@ -97,8 +98,10 @@ function parseStoredImageRecord(record, index) {
 
   return {
     ...parsed,
+    id: typeof record.id === 'string' ? record.id : `archived-${index}`,
     prompt: typeof record.prompt === 'string' ? record.prompt.trim() : '',
     provider: typeof record.provider === 'string' ? record.provider.trim() : '',
+    model: typeof record.model === 'string' ? record.model.trim() : '',
     createdAt: formatTimestamp(record.created_at),
   }
 }
@@ -123,7 +126,7 @@ async function generateImages() {
   isLoading.value = true
   error.value = ''
   revisedPrompt.value = ''
-  resultSource.value = 'generate'
+  activeTab.value = 'generate'
   images.value = []
 
   try {
@@ -154,47 +157,72 @@ async function generateImages() {
   }
 }
 
-async function loadExistingImages() {
-  if (isBusy.value) return
+async function loadArchivePage({ reset = false } = {}) {
+  if (isArchiveLoading.value) return
 
-  isLoadingExisting.value = true
-  error.value = ''
-  revisedPrompt.value = ''
-  resultSource.value = 'existing'
-  images.value = []
+  isArchiveLoading.value = true
+  archiveError.value = ''
 
   try {
-    const response = await fetch(`${API_BASE_URL}/api/images?limit=${debugLimit.value}&offset=0`)
+    const nextOffset = reset ? 0 : archiveOffset.value
+    const response = await fetch(`${API_BASE_URL}/api/images?limit=${archivePageSize}&offset=${nextOffset}`)
     const payload = await response.json().catch(() => [])
 
     if (!response.ok) {
-      throw new Error(payload.error || payload.details || 'Failed to load existing images.')
+      throw new Error(payload.error || payload.details || 'Failed to load archive.')
     }
-
     if (!Array.isArray(payload)) {
-      throw new Error('Unexpected response when loading existing images.')
+      throw new Error('Unexpected response when loading archive.')
     }
 
-    images.value = dedupeImages(payload.map((item, index) => parseStoredImageRecord(item, index)).filter(Boolean))
-
-    if (!images.value.length) {
-      throw new Error('No stored images found in the database yet.')
-    }
+    const parsed = payload.map((item, index) => parseStoredImageRecord(item, nextOffset + index)).filter(Boolean)
+    archiveRuns.value = reset ? parsed : [...archiveRuns.value, ...parsed]
+    archiveOffset.value = nextOffset + payload.length
+    hasMoreArchive.value = payload.length === archivePageSize
+    archiveInitialized.value = true
   } catch (requestError) {
-    error.value = requestError instanceof Error ? requestError.message : 'Unexpected error.'
+    archiveError.value = requestError instanceof Error ? requestError.message : 'Unexpected error.'
   } finally {
-    isLoadingExisting.value = false
+    isArchiveLoading.value = false
   }
 }
+
+watch(activeTab, (tab) => {
+  if (tab !== 'archive' || archiveInitialized.value) return
+  loadArchivePage({ reset: true })
+})
 </script>
 
 <template>
   <main class="app-shell">
     <section class="panel">
       <h1>AI Image Playground</h1>
-      <p class="subtitle">Enter a prompt to generate images from the backend API.</p>
+      <p class="subtitle">Generate images, then browse complete run history in Archive.</p>
 
-      <form class="prompt-form" @submit.prevent="generateImages">
+      <div class="tabs" role="tablist" aria-label="Image tools">
+        <button
+          type="button"
+          class="tab-btn"
+          :class="{ active: activeTab === 'generate' }"
+          role="tab"
+          :aria-selected="activeTab === 'generate'"
+          @click="activeTab = 'generate'"
+        >
+          Generate
+        </button>
+        <button
+          type="button"
+          class="tab-btn"
+          :class="{ active: activeTab === 'archive' }"
+          role="tab"
+          :aria-selected="activeTab === 'archive'"
+          @click="activeTab = 'archive'"
+        >
+          Archive
+        </button>
+      </div>
+
+      <form v-if="activeTab === 'generate'" class="prompt-form" @submit.prevent="generateImages">
         <label class="prompt-label" for="prompt-input">Prompt</label>
         <textarea
           id="prompt-input"
@@ -208,30 +236,22 @@ async function loadExistingImages() {
         </button>
       </form>
 
-      <div class="debug-tools">
-        <label for="debug-count">Debug from DB</label>
-        <select id="debug-count" v-model.number="debugLimit" :disabled="isBusy">
-          <option :value="1">1 image</option>
-          <option :value="4">4 images</option>
-          <option :value="8">8 images</option>
-          <option :value="16">16 images</option>
-        </select>
-        <button type="button" class="secondary" :disabled="isBusy" @click="loadExistingImages">
-          {{ isLoadingExisting ? 'Loading...' : 'Load Existing Images' }}
+      <div v-else class="archive-toolbar">
+        <button type="button" class="secondary" :disabled="isArchiveLoading" @click="loadArchivePage({ reset: true })">
+          {{ isArchiveLoading ? 'Refreshing...' : 'Refresh Archive' }}
         </button>
+        <span class="archive-count">{{ archiveCount }} run{{ archiveCount === 1 ? '' : 's' }} loaded</span>
       </div>
 
-      <p v-if="error" class="message error">{{ error }}</p>
-      <p v-else-if="revisedPrompt" class="message info">Revised prompt: {{ revisedPrompt }}</p>
+      <p v-if="activeTab === 'generate' && error" class="message error">{{ error }}</p>
+      <p v-else-if="activeTab === 'generate' && revisedPrompt" class="message info">Revised prompt: {{ revisedPrompt }}</p>
+      <p v-if="activeTab === 'archive' && archiveError" class="message error">{{ archiveError }}</p>
     </section>
 
-    <section class="results">
+    <section v-if="activeTab === 'generate'" class="results">
       <div class="results-header">
         <h2>Results</h2>
-        <span v-if="imageCount">
-          {{ imageCount }} image{{ imageCount === 1 ? '' : 's' }}
-          <template v-if="resultSource === 'existing'"> from DB</template>
-        </span>
+        <span v-if="imageCount">{{ imageCount }} image{{ imageCount === 1 ? '' : 's' }}</span>
       </div>
 
       <p v-if="!imageCount && !isBusy" class="empty-state">
@@ -241,15 +261,47 @@ async function loadExistingImages() {
       <div v-if="imageCount" class="image-grid">
         <article v-for="(image, index) in images" :key="`${image.src}-${index}`" class="image-card">
           <img :src="image.src" :alt="image.alt" loading="lazy" />
-          <div v-if="image.prompt || image.provider || image.createdAt" class="image-meta">
-            <p v-if="image.prompt" class="image-prompt">{{ image.prompt }}</p>
-            <p v-if="image.provider || image.createdAt" class="image-details">
-              <span v-if="image.provider">{{ image.provider }}</span>
-              <span v-if="image.provider && image.createdAt"> · </span>
-              <span v-if="image.createdAt">{{ image.createdAt }}</span>
+        </article>
+      </div>
+    </section>
+
+    <section v-else class="results">
+      <div class="results-header">
+        <h2>Archive</h2>
+        <span v-if="archiveCount">{{ archiveCount }} run{{ archiveCount === 1 ? '' : 's' }}</span>
+      </div>
+
+      <p v-if="!archiveCount && !isArchiveLoading && !archiveError" class="empty-state">
+        No archived runs found yet.
+      </p>
+
+      <div v-if="archiveCount" class="image-grid">
+        <article v-for="(run, index) in archiveRuns" :key="`${run.id}-${index}`" class="image-card">
+          <img :src="run.src" :alt="run.alt" loading="lazy" />
+          <div class="image-meta">
+            <p v-if="run.prompt" class="image-prompt">{{ run.prompt }}</p>
+            <p class="image-details">
+              <span v-if="run.provider">{{ run.provider }}</span>
+              <span v-if="run.provider && run.model"> / </span>
+              <span v-if="run.model">{{ run.model }}</span>
+              <span v-if="(run.provider || run.model) && run.createdAt"> · </span>
+              <span v-if="run.createdAt">{{ run.createdAt }}</span>
             </p>
+            <p class="image-id">Run: {{ run.id }}</p>
           </div>
         </article>
+      </div>
+
+      <div class="archive-actions">
+        <button type="button" class="secondary" :disabled="isArchiveLoading || !hasMoreArchive" @click="loadArchivePage()">
+          {{
+            isArchiveLoading
+              ? 'Loading...'
+              : hasMoreArchive
+                ? `Load More (${archivePageSize})`
+                : 'All Runs Loaded'
+          }}
+        </button>
       </div>
     </section>
   </main>
@@ -283,30 +335,42 @@ h1 {
   margin-bottom: 1rem;
 }
 
+.tabs {
+  display: flex;
+  gap: 0.55rem;
+  margin-bottom: 0.85rem;
+}
+
+.tab-btn {
+  background: #eff5ff;
+  border: 1px solid #b9c9e3;
+  color: #20457d;
+  border-radius: 999px;
+  padding: 0.4rem 0.9rem;
+  font-weight: 600;
+}
+
+.tab-btn.active {
+  background: #0e4cb3;
+  border-color: #0e4cb3;
+  color: #ffffff;
+}
+
 .prompt-form {
   display: grid;
   gap: 0.75rem;
 }
 
-.debug-tools {
-  margin-top: 0.8rem;
+.archive-toolbar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 0.6rem;
 }
 
-.debug-tools label {
-  color: #203a67;
-  font-weight: 600;
-}
-
-.debug-tools select {
-  border: 1px solid #b9c9e3;
-  border-radius: 8px;
-  padding: 0.4rem 0.55rem;
-  font: inherit;
-  background: #ffffff;
+.archive-count {
+  color: #516b94;
+  font-size: 0.9rem;
 }
 
 .prompt-label {
@@ -426,6 +490,18 @@ h2 {
   margin: 0.45rem 0 0;
   color: #58719b;
   font-size: 0.8rem;
+}
+
+.image-id {
+  margin: 0.35rem 0 0;
+  color: #7f94b8;
+  font-size: 0.75rem;
+}
+
+.archive-actions {
+  margin-top: 1rem;
+  display: flex;
+  justify-content: center;
 }
 
 @media (min-width: 860px) {
