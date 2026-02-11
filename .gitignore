@@ -1,0 +1,45 @@
+# Shared logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# OS/editor files
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Python (backend)
+/backend/.env
+/backend/.venv/
+/backend/__pycache__/
+/backend/*.pyc
+/backend/data/
+
+# Node/frontend
+node_modules
+/frontend/dist
+/frontend/dist-ssr
+/frontend/coverage
+*.local
+*.tsbuildinfo
+.eslintcache
+
+# Cypress
+/frontend/cypress/videos/
+/frontend/cypress/screenshots/
+
+# Vitest
+/frontend/__screenshots__/
+
+# Vite
+*.timestamp-*-*.mjs
