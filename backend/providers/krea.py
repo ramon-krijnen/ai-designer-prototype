@@ -290,7 +290,6 @@ class KreaImageProvider:
 
         parsed = urlparse(trimmed)
         if parsed.scheme in {"http", "https"}:
-            self._ensure_trusted_download_host(parsed.hostname or "")
             image_bytes = self._download_bytes(trimmed)
             return base64.b64encode(image_bytes).decode("ascii")
 

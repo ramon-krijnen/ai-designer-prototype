@@ -168,6 +168,8 @@ def _generate_from_payload(payload: dict[str, Any]) -> tuple[Any, int]:
                     "image_id": saved_record["id"],
                     "image_url": url_for("get_image_file", image_id=saved_record["id"]),
                     "run_id": run_id,
+                    "created_at": saved_record["created_at"],
+                    "sha256": saved_record["sha256"],
                 }
             )
 
@@ -185,6 +187,8 @@ def _generate_from_payload(payload: dict[str, Any]) -> tuple[Any, int]:
                     "image_id": first["image_id"],
                     "image_url": first["image_url"],
                     "run_id": run_id,
+                    "created_at": first["created_at"],
+                    "sha256": first["sha256"],
                     "images": responses,
                 }
             ),

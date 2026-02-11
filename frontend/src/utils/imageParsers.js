@@ -57,12 +57,18 @@ export function formatTimestamp(value) {
 }
 
 function candidateMetadata(candidate) {
+  const imageId = pickStringField(candidate.id || candidate.image_id)
   return {
-    id: pickStringField(candidate.id || candidate.image_id),
+    id: imageId,
+    imageId,
     runId: pickStringField(candidate.run_id),
     prompt: pickStringField(candidate.prompt),
+    revisedPrompt: pickStringField(candidate.revised_prompt),
     provider: pickStringField(candidate.provider),
     model: pickStringField(candidate.model),
+    size: pickStringField(candidate.size),
+    quality: pickStringField(candidate.quality),
+    sha256: pickStringField(candidate.sha256),
     createdAt: formatTimestamp(candidate.created_at),
   }
 }
@@ -101,10 +107,15 @@ export function parseStoredImageRecord(record, index, apiBaseUrl = '') {
   return {
     ...parsed,
     id: typeof record.id === 'string' ? record.id : `archived-${index}`,
+    imageId: typeof record.id === 'string' ? record.id : '',
     runId: typeof record.run_id === 'string' ? record.run_id : '',
     prompt: pickStringField(record.prompt),
+    revisedPrompt: pickStringField(record.revised_prompt),
     provider: pickStringField(record.provider),
     model: pickStringField(record.model),
+    size: pickStringField(record.size),
+    quality: pickStringField(record.quality),
+    sha256: pickStringField(record.sha256),
     createdAt: formatTimestamp(record.created_at),
   }
 }
@@ -129,14 +140,14 @@ export function parseRunRecord(run, index, apiBaseUrl = '') {
 export function extractImages(payload, apiBaseUrl = '', extra = {}) {
   const candidates = []
 
+  if (Array.isArray(payload?.images)) candidates.push(...payload.images)
+  if (Array.isArray(payload?.data)) candidates.push(...payload.data)
+  if (Array.isArray(payload?.image_urls)) candidates.push(...payload.image_urls)
+
   const singleImageCandidate = payload?.image_url || payload?.image_base64 || payload?.b64_json
   if (singleImageCandidate) {
     candidates.push(singleImageCandidate)
   }
-
-  if (Array.isArray(payload?.images)) candidates.push(...payload.images)
-  if (Array.isArray(payload?.data)) candidates.push(...payload.data)
-  if (Array.isArray(payload?.image_urls)) candidates.push(...payload.image_urls)
 
   return dedupeImages(
     candidates
