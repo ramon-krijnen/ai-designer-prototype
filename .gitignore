@@ -9,20 +9,26 @@ lerna-debug.log*
 
 # OS/editor files
 .DS_Store
-.vscode/*
-!.vscode/extensions.json
-.idea
+.vscode/
+!**/.vscode/extensions.json
+.idea/
+.idea/*
+!.idea/.gitignore
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+.aiignore
 
 # Python (backend)
 /backend/.env
 /backend/.venv/
-/backend/__pycache__/
-/backend/*.pyc
+/backend/**/__pycache__/
+/backend/**/*.py[cod]
+/backend/.pytest_cache/
+/backend/.mypy_cache/
+/backend/.ruff_cache/
 /backend/data/
 
 # Node/frontend
