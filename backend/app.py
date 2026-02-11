@@ -179,9 +179,9 @@ def _generate_from_payload(payload: dict[str, Any]) -> tuple[Any, int]:
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
-    except Exception as exc:
+    except Exception:
         app.logger.exception("Image generation failed")
-        return jsonify({"error": "Image generation failed", "details": str(exc)}), HTTPStatus.BAD_GATEWAY
+        return jsonify({"error": "Image generation failed"}), HTTPStatus.BAD_GATEWAY
 
 
 @app.post("/api/images/openai")
