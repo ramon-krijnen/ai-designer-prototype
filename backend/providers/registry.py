@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Mapping
 
 from providers.base import ImageProvider
+from providers.krea import KreaImageProvider
 from providers.openai import OpenAIImageProvider
 
 
@@ -10,6 +11,7 @@ class ProviderRegistry:
     def __init__(self) -> None:
         self._providers: dict[str, type[ImageProvider]] = {
             "openai": OpenAIImageProvider,
+            "krea": KreaImageProvider,
         }
 
     def get(self, name: str) -> ImageProvider:
@@ -21,3 +23,11 @@ class ProviderRegistry:
 
     def names(self) -> Mapping[str, type[ImageProvider]]:
         return self._providers
+
+    def metadata(self) -> dict[str, dict[str, object]]:
+        result: dict[str, dict[str, object]] = {}
+        for name, provider_cls in self._providers.items():
+            options = getattr(provider_cls, "OPTIONS", None)
+            if isinstance(options, dict):
+                result[name] = options
+        return result

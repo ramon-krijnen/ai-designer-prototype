@@ -10,6 +10,7 @@ class ImageGenerationRequest:
     model: str | None = None
     size: str | None = None
     quality: str | None = None
+    steps: int | None = None
 
 
 @dataclass(frozen=True)

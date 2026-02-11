@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').trim()
 
@@ -9,6 +9,13 @@ const error = ref('')
 const images = ref([])
 const revisedPrompt = ref('')
 const activeTab = ref('generate')
+const provider = ref('openai')
+const size = ref('1024x1024')
+const steps = ref('28')
+const quality = ref('')
+const selectedModels = ref([])
+
+const providerOptions = ref({})
 
 const archiveRuns = ref([])
 const archiveError = ref('')
@@ -17,10 +24,17 @@ const archiveOffset = ref(0)
 const archivePageSize = 24
 const hasMoreArchive = ref(true)
 const archiveInitialized = ref(false)
+const lightboxImage = ref(null)
 
 const imageCount = computed(() => images.value.length)
 const archiveCount = computed(() => archiveRuns.value.length)
 const isBusy = computed(() => isLoading.value || isArchiveLoading.value)
+const currentProviderOption = computed(() => providerOptions.value[provider.value] || null)
+const providerNames = computed(() => Object.keys(providerOptions.value))
+const currentModelOptions = computed(() => currentProviderOption.value?.models || [])
+const currentSizeOptions = computed(() => currentProviderOption.value?.sizes || [])
+const currentQualityOptions = computed(() => currentProviderOption.value?.qualities || [])
+const currentSupportsSteps = computed(() => Boolean(currentProviderOption.value?.supports_steps))
 
 function normalizeImageSource(value, mimeType = 'image/png') {
   if (typeof value !== 'string') return null
@@ -99,6 +113,7 @@ function parseStoredImageRecord(record, index) {
   return {
     ...parsed,
     id: typeof record.id === 'string' ? record.id : `archived-${index}`,
+    runId: typeof record.run_id === 'string' ? record.run_id : '',
     prompt: typeof record.prompt === 'string' ? record.prompt.trim() : '',
     provider: typeof record.provider === 'string' ? record.provider.trim() : '',
     model: typeof record.model === 'string' ? record.model.trim() : '',
@@ -106,22 +121,49 @@ function parseStoredImageRecord(record, index) {
   }
 }
 
-function extractImages(payload) {
+function parseRunRecord(run, index) {
+  if (!run || typeof run !== 'object') return null
+  const runId = typeof run.run_id === 'string' ? run.run_id : `run-${index}`
+  const createdAt = formatTimestamp(run.created_at)
+  const imagesForRun = Array.isArray(run.images)
+    ? run.images.map((item, imageIndex) => parseStoredImageRecord(item, imageIndex)).filter(Boolean)
+    : []
+  return {
+    runId,
+    createdAt,
+    imageCount: typeof run.image_count === 'number' ? run.image_count : imagesForRun.length,
+    images: imagesForRun,
+  }
+}
+
+function extractImages(payload, extra = {}) {
   const candidates = []
+
+  // For this backend contract, a single generation may include both image_url and image_base64.
+  // Prefer one canonical source to avoid rendering the same image twice.
+  const singleImageCandidate = payload?.image_url || payload?.image_base64 || payload?.b64_json
+  if (singleImageCandidate) {
+    candidates.push(singleImageCandidate)
+  }
 
   if (Array.isArray(payload?.images)) candidates.push(...payload.images)
   if (Array.isArray(payload?.data)) candidates.push(...payload.data)
   if (Array.isArray(payload?.image_urls)) candidates.push(...payload.image_urls)
-  if (payload?.image_url) candidates.push(payload.image_url)
-  if (payload?.image_base64) candidates.push(payload.image_base64)
-  if (payload?.b64_json) candidates.push(payload.b64_json)
 
-  return dedupeImages(candidates.map((item, index) => parseImageCandidate(item, index)).filter(Boolean))
+  return dedupeImages(
+    candidates
+      .map((item, index) => parseImageCandidate(item, index))
+      .filter(Boolean)
+      .map((image) => ({ ...image, ...extra })),
+  )
 }
 
 async function generateImages() {
   const trimmedPrompt = prompt.value.trim()
   if (!trimmedPrompt || isBusy.value) return
+  const enabledModels = currentModelOptions.value
+    .map((option) => option.id)
+    .filter((id) => selectedModels.value.includes(id))
 
   isLoading.value = true
   error.value = ''
@@ -130,12 +172,23 @@ async function generateImages() {
   images.value = []
 
   try {
+    if (!enabledModels.length) {
+      throw new Error('Select at least one model.')
+    }
+
     const response = await fetch(`${API_BASE_URL}/api/images/generate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ prompt: trimmedPrompt }),
+      body: JSON.stringify({
+        prompt: trimmedPrompt,
+        provider: provider.value,
+        models: enabledModels,
+        size: size.value.trim() || undefined,
+        quality: quality.value || undefined,
+        steps: steps.value.trim() ? Number.parseInt(steps.value, 10) : undefined,
+      }),
     })
 
     const payload = await response.json().catch(() => ({}))
@@ -144,7 +197,10 @@ async function generateImages() {
       throw new Error(payload.error || payload.details || 'Request failed.')
     }
 
-    revisedPrompt.value = payload.revised_prompt || ''
+    if (payload.revised_prompt) {
+      revisedPrompt.value = payload.revised_prompt
+    }
+
     images.value = extractImages(payload)
 
     if (!images.value.length) {
@@ -165,7 +221,7 @@ async function loadArchivePage({ reset = false } = {}) {
 
   try {
     const nextOffset = reset ? 0 : archiveOffset.value
-    const response = await fetch(`${API_BASE_URL}/api/images?limit=${archivePageSize}&offset=${nextOffset}`)
+    const response = await fetch(`${API_BASE_URL}/api/runs?limit=${archivePageSize}&offset=${nextOffset}`)
     const payload = await response.json().catch(() => [])
 
     if (!response.ok) {
@@ -175,7 +231,7 @@ async function loadArchivePage({ reset = false } = {}) {
       throw new Error('Unexpected response when loading archive.')
     }
 
-    const parsed = payload.map((item, index) => parseStoredImageRecord(item, nextOffset + index)).filter(Boolean)
+    const parsed = payload.map((item, index) => parseRunRecord(item, nextOffset + index)).filter(Boolean)
     archiveRuns.value = reset ? parsed : [...archiveRuns.value, ...parsed]
     archiveOffset.value = nextOffset + payload.length
     hasMoreArchive.value = payload.length === archivePageSize
@@ -191,6 +247,60 @@ watch(activeTab, (tab) => {
   if (tab !== 'archive' || archiveInitialized.value) return
   loadArchivePage({ reset: true })
 })
+
+function resetProviderDefaults(nextProvider) {
+  const options = providerOptions.value[nextProvider]
+  if (!options) return
+
+  const models = Array.isArray(options.models) ? options.models.map((item) => item.id || item).filter(Boolean) : []
+  selectedModels.value = models
+
+  const sizes = Array.isArray(options.sizes) ? options.sizes : []
+  size.value = sizes[0] || ''
+
+  const qualities = Array.isArray(options.qualities) ? options.qualities : []
+  quality.value = qualities[0] || ''
+
+  const defaultSteps = options.default_steps
+  steps.value = defaultSteps ? String(defaultSteps) : '28'
+}
+
+watch(provider, (nextProvider) => {
+  resetProviderDefaults(nextProvider)
+})
+
+async function loadProviderOptions() {
+  const response = await fetch(`${API_BASE_URL}/api/providers`)
+  const payload = await response.json().catch(() => ({}))
+
+  if (!response.ok || !payload || typeof payload !== 'object') {
+    throw new Error('Failed to load provider options')
+  }
+
+  providerOptions.value = payload
+  const firstProvider = Object.keys(providerOptions.value)[0]
+  if (firstProvider) {
+    provider.value = firstProvider
+    resetProviderDefaults(firstProvider)
+  }
+}
+
+onMounted(async () => {
+  try {
+    await loadProviderOptions()
+  } catch (providerError) {
+    error.value = providerError instanceof Error ? providerError.message : 'Failed to load providers.'
+  }
+})
+
+function openLightbox(image) {
+  if (!image?.src) return
+  lightboxImage.value = image
+}
+
+function closeLightbox() {
+  lightboxImage.value = null
+}
 </script>
 
 <template>
@@ -223,6 +333,44 @@ watch(activeTab, (tab) => {
       </div>
 
       <form v-if="activeTab === 'generate'" class="prompt-form" @submit.prevent="generateImages">
+        <div class="provider-controls">
+          <div class="control-field">
+            <label class="prompt-label" for="provider-select">Provider</label>
+            <select id="provider-select" v-model="provider" :disabled="isBusy">
+              <option v-for="name in providerNames" :key="name" :value="name">{{ name }}</option>
+            </select>
+          </div>
+
+          <div class="control-field">
+            <label class="prompt-label">Models</label>
+            <div class="model-checklist">
+              <label v-for="option in currentModelOptions" :key="option.id" class="check-item">
+                <input v-model="selectedModels" type="checkbox" :value="option.id" :disabled="isBusy" />
+                <span>{{ option.label || option.id }}</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="control-field">
+            <label class="prompt-label" for="size-input">Size</label>
+            <select id="size-input" v-model="size" :disabled="isBusy || !currentSizeOptions.length">
+              <option v-for="option in currentSizeOptions" :key="option" :value="option">{{ option }}</option>
+            </select>
+          </div>
+
+          <div class="control-field" v-if="currentQualityOptions.length">
+            <label class="prompt-label" for="quality-input">Quality</label>
+            <select id="quality-input" v-model="quality" :disabled="isBusy">
+              <option v-for="option in currentQualityOptions" :key="option" :value="option">{{ option }}</option>
+            </select>
+          </div>
+
+          <div class="control-field" v-if="currentSupportsSteps">
+            <label class="prompt-label" for="steps-input">Steps</label>
+            <input id="steps-input" v-model="steps" type="number" min="1" placeholder="28" :disabled="isBusy" />
+          </div>
+        </div>
+
         <label class="prompt-label" for="prompt-input">Prompt</label>
         <textarea
           id="prompt-input"
@@ -260,7 +408,14 @@ watch(activeTab, (tab) => {
 
       <div v-if="imageCount" class="image-grid">
         <article v-for="(image, index) in images" :key="`${image.src}-${index}`" class="image-card">
-          <img :src="image.src" :alt="image.alt" loading="lazy" />
+          <img :src="image.src" :alt="image.alt" class="clickable-image" loading="lazy" @click="openLightbox(image)" />
+          <div v-if="image.provider || image.model" class="image-meta">
+            <p class="image-details">
+              <span v-if="image.provider">{{ image.provider }}</span>
+              <span v-if="image.provider && image.model"> / </span>
+              <span v-if="image.model">{{ image.model }}</span>
+            </p>
+          </div>
         </article>
       </div>
     </section>
@@ -275,19 +430,34 @@ watch(activeTab, (tab) => {
         No archived runs found yet.
       </p>
 
-      <div v-if="archiveCount" class="image-grid">
-        <article v-for="(run, index) in archiveRuns" :key="`${run.id}-${index}`" class="image-card">
-          <img :src="run.src" :alt="run.alt" loading="lazy" />
-          <div class="image-meta">
-            <p v-if="run.prompt" class="image-prompt">{{ run.prompt }}</p>
+      <div v-if="archiveCount" class="run-list">
+        <article v-for="(run, runIndex) in archiveRuns" :key="`${run.runId}-${runIndex}`" class="run-block">
+          <div class="run-header">
+            <p class="image-id">Run: {{ run.runId }}</p>
             <p class="image-details">
-              <span v-if="run.provider">{{ run.provider }}</span>
-              <span v-if="run.provider && run.model"> / </span>
-              <span v-if="run.model">{{ run.model }}</span>
-              <span v-if="(run.provider || run.model) && run.createdAt"> · </span>
-              <span v-if="run.createdAt">{{ run.createdAt }}</span>
+              <span>{{ run.imageCount }} image{{ run.imageCount === 1 ? '' : 's' }}</span>
+              <span v-if="run.createdAt"> · {{ run.createdAt }}</span>
             </p>
-            <p class="image-id">Run: {{ run.id }}</p>
+          </div>
+
+          <div class="image-grid">
+            <article v-for="(image, imageIndex) in run.images" :key="`${image.id}-${imageIndex}`" class="image-card">
+              <img
+                :src="image.src"
+                :alt="image.alt"
+                class="clickable-image"
+                loading="lazy"
+                @click="openLightbox(image)"
+              />
+              <div class="image-meta">
+                <p v-if="image.prompt" class="image-prompt">{{ image.prompt }}</p>
+                <p class="image-details">
+                  <span v-if="image.provider">{{ image.provider }}</span>
+                  <span v-if="image.provider && image.model"> / </span>
+                  <span v-if="image.model">{{ image.model }}</span>
+                </p>
+              </div>
+            </article>
           </div>
         </article>
       </div>
@@ -304,6 +474,11 @@ watch(activeTab, (tab) => {
         </button>
       </div>
     </section>
+
+    <div v-if="lightboxImage" class="lightbox" @click.self="closeLightbox">
+      <button type="button" class="lightbox-close" @click="closeLightbox">Close</button>
+      <img :src="lightboxImage.src" :alt="lightboxImage.alt || 'Preview image'" class="lightbox-image" />
+    </div>
   </main>
 </template>
 
@@ -361,6 +536,38 @@ h1 {
   gap: 0.75rem;
 }
 
+.provider-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.7rem;
+}
+
+.control-field {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.model-checklist {
+  display: grid;
+  gap: 0.35rem;
+  border: 1px solid #b9c9e3;
+  border-radius: 10px;
+  padding: 0.5rem 0.6rem;
+  background: #ffffff;
+}
+
+.check-item {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: #1f3f73;
+  font-size: 0.92rem;
+}
+
+.check-item input {
+  width: auto;
+}
+
 .archive-toolbar {
   display: flex;
   align-items: center;
@@ -386,6 +593,16 @@ textarea {
   font: inherit;
   resize: vertical;
   min-height: 110px;
+}
+
+input,
+select {
+  width: 100%;
+  border: 1px solid #b9c9e3;
+  border-radius: 10px;
+  padding: 0.55rem 0.7rem;
+  font: inherit;
+  background: #ffffff;
 }
 
 textarea:focus {
@@ -454,6 +671,27 @@ h2 {
   color: #5b6f93;
 }
 
+
+.run-list {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.run-block {
+  border: 1px solid #dbe3ef;
+  border-radius: 10px;
+  padding: 0.8rem;
+  background: #f7faff;
+}
+
+.run-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+
 .image-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -474,6 +712,10 @@ h2 {
   object-fit: cover;
 }
 
+.clickable-image {
+  cursor: zoom-in;
+}
+
 .image-meta {
   padding: 0.65rem 0.75rem 0.75rem;
   background: #ffffff;
@@ -484,6 +726,11 @@ h2 {
   color: #163869;
   font-size: 0.9rem;
   line-height: 1.35;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .image-details {
@@ -502,6 +749,34 @@ h2 {
   margin-top: 1rem;
   display: flex;
   justify-content: center;
+}
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 19, 38, 0.85);
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+}
+
+.lightbox-image {
+  max-width: min(95vw, 1600px);
+  max-height: 88vh;
+  width: auto;
+  height: auto;
+  border-radius: 10px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+}
+
+.lightbox-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background: #ffffff;
+  color: #173564;
+  border: 1px solid #b7c7e3;
 }
 
 @media (min-width: 860px) {
