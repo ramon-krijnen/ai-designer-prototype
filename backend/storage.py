@@ -246,6 +246,20 @@ class ImageStore:
             )
         return runs
 
+    def list_run_images(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, run_id, created_at, provider, model, prompt, revised_prompt, size, quality,
+                       image_path, mime_type, sha256
+                FROM image_generations
+                WHERE run_id = ?
+                ORDER BY created_at ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     @staticmethod
     def _load_json(value: str | None, default: dict[str, Any]) -> dict[str, Any]:
         if not value:

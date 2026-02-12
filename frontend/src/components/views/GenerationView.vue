@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
-import { extractImages } from '../../utils/imageParsers'
+import { dedupeImages, extractImages } from '../../utils/imageParsers'
 
 const props = defineProps({
   apiBaseUrl: {
@@ -55,6 +55,7 @@ const currentQualityOptions = computed(() => {
   return Array.isArray(qualities) ? qualities.filter((item) => typeof item === 'string' && item.trim()) : []
 })
 const currentSupportsSteps = computed(() => Boolean(currentProviderOption.value?.supports_steps))
+const POLL_INTERVAL_MS = 700
 
 function resetProviderDefaults(nextProvider) {
   const options = providerOptions.value[nextProvider]
@@ -132,13 +133,15 @@ async function generateImages() {
       throw new Error(payload.error || payload.details || 'Request failed.')
     }
 
-    if (typeof payload.revised_prompt === 'string' && payload.revised_prompt.trim()) {
-      revisedPrompt.value = payload.revised_prompt
+    const runId = typeof payload.run_id === 'string' ? payload.run_id.trim() : ''
+    if (!runId) {
+      throw new Error('Missing run id in generate response.')
     }
 
-    images.value = extractImages(payload, props.apiBaseUrl, {
-      prompt: typeof payload.prompt === 'string' ? payload.prompt : trimmedPrompt,
-    })
+    const status = await pollRunStatus(runId, trimmedPrompt)
+    if (status.failed > 0) {
+      error.value = `${status.failed} model request(s) failed. Showing successful images.`
+    }
 
     if (!images.value.length) {
       throw new Error('No images were returned by the API.')
@@ -147,6 +150,38 @@ async function generateImages() {
     error.value = requestError instanceof Error ? requestError.message : 'Unexpected error.'
   } finally {
     isLoading.value = false
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+async function pollRunStatus(runId, fallbackPrompt) {
+  while (true) {
+    const response = await fetch(`${props.apiBaseUrl}/api/runs/${runId}/status`)
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      throw new Error(payload.error || payload.details || 'Failed to fetch run status.')
+    }
+
+    if (typeof payload.revised_prompt === 'string' && payload.revised_prompt.trim()) {
+      revisedPrompt.value = payload.revised_prompt
+    }
+
+    const nextImages = extractImages(payload, props.apiBaseUrl, {
+      prompt: typeof payload.prompt === 'string' ? payload.prompt : fallbackPrompt,
+    })
+    images.value = dedupeImages([...images.value, ...nextImages])
+
+    if (payload.done) {
+      return {
+        failed: typeof payload.failed === 'number' ? payload.failed : 0,
+      }
+    }
+    await sleep(POLL_INTERVAL_MS)
   }
 }
 
