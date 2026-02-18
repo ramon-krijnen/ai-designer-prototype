@@ -19,6 +19,15 @@ const archivePageSize = 24
 const hasMoreArchive = ref(true)
 
 const archiveCount = computed(() => archiveRuns.value.length)
+const MAX_TARGET_LABELS = 4
+
+function targetLabel(target) {
+  if (!target) return ''
+  const provider = typeof target.provider === 'string' ? target.provider.trim() : ''
+  const model = typeof target.model === 'string' ? target.model.trim() : ''
+  if (provider && model) return `${provider} / ${model}`
+  return provider || model
+}
 
 async function loadArchivePage({ reset = false } = {}) {
   if (isArchiveLoading.value) return
@@ -88,6 +97,33 @@ onMounted(() => {
               <span>{{ run.imageCount }} image{{ run.imageCount === 1 ? '' : 's' }}</span>
               <span v-if="run.createdAt"> · {{ run.createdAt }}</span>
             </p>
+          </div>
+
+          <p v-if="run.modelTargets?.length" class="run-targets">
+            Targets:
+            {{
+              run.modelTargets
+                .slice(0, MAX_TARGET_LABELS)
+                .map((target) => targetLabel(target))
+                .filter(Boolean)
+                .join(', ')
+            }}
+            <span v-if="run.modelTargets.length > MAX_TARGET_LABELS"> +{{ run.modelTargets.length - MAX_TARGET_LABELS }} more</span>
+          </p>
+
+          <div v-if="run.referenceImages?.length" class="reference-block">
+            <p class="reference-title">
+              Reference images ({{ run.referenceImages.length }})
+            </p>
+            <div class="reference-grid">
+              <img
+                v-for="(referenceImage, referenceIndex) in run.referenceImages"
+                :key="`${referenceImage.id}-${referenceIndex}`"
+                :src="referenceImage.src"
+                :alt="referenceImage.name || `Run reference image ${referenceIndex + 1}`"
+                loading="lazy"
+              />
+            </div>
           </div>
 
           <div class="image-grid">
@@ -214,6 +250,42 @@ h2 {
   justify-content: space-between;
   gap: 0.75rem;
   margin-bottom: 0.65rem;
+}
+
+.run-targets {
+  margin: 0 0 0.6rem;
+  color: #355884;
+  font-size: 0.82rem;
+}
+
+.reference-block {
+  margin: 0 0 0.7rem;
+  padding: 0.65rem;
+  border: 1px solid #dbe3ef;
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.reference-title {
+  margin: 0 0 0.5rem;
+  color: #2a4f7f;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.reference-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
+  gap: 0.45rem;
+}
+
+.reference-grid img {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid #dbe3ef;
+  background: #f4f8ff;
 }
 
 .image-grid {

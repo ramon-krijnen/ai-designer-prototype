@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { dedupeImages, extractImages } from '../../utils/imageParsers'
 
 const props = defineProps({
@@ -17,75 +17,128 @@ const error = ref('')
 const revisedPrompt = ref('')
 const images = ref([])
 
-const provider = ref('openai')
-const size = ref('1024x1024')
-const steps = ref('28')
-const quality = ref('')
-const selectedModels = ref([])
 const providerOptions = ref({})
+const selectedModelKeys = ref([])
+const selectionSettings = ref({})
 const editImages = ref([])
 
 const MAX_EDIT_IMAGES = 16
+const POLL_INTERVAL_MS = 700
+
 const imageCount = computed(() => images.value.length)
 const editImageCount = computed(() => editImages.value.length)
 const providerNames = computed(() => Object.keys(providerOptions.value))
-const currentProviderOption = computed(() => providerOptions.value[provider.value] || null)
-const currentModelOptions = computed(() => {
-  const models = currentProviderOption.value?.models || []
-  return models
-    .map((item) => {
-      if (typeof item === 'string') {
-        return { id: item, label: item }
-      }
-      if (!item || typeof item !== 'object') {
-        return null
-      }
-      const id = typeof item.id === 'string' ? item.id.trim() : ''
-      if (!id) return null
-      return {
-        id,
-        label: typeof item.label === 'string' && item.label.trim() ? item.label.trim() : id,
-      }
+
+const modelCatalog = computed(() => {
+  const items = []
+  providerNames.value.forEach((providerName) => {
+    const providerConfig = providerOptions.value[providerName] || {}
+    const models = Array.isArray(providerConfig.models) ? providerConfig.models : []
+
+    models.forEach((modelItem) => {
+      const modelId =
+        typeof modelItem === 'string' ? modelItem.trim() : typeof modelItem?.id === 'string' ? modelItem.id.trim() : ''
+      if (!modelId) return
+
+      const modelLabel =
+        typeof modelItem === 'object' && typeof modelItem?.label === 'string' && modelItem.label.trim()
+          ? modelItem.label.trim()
+          : modelId
+
+      const key = buildModelKey(providerName, modelId)
+      items.push({
+        key,
+        provider: providerName,
+        model: modelId,
+        label: modelLabel,
+        sizes: normalizeStringOptions(providerConfig.sizes),
+        qualities: normalizeStringOptions(providerConfig.qualities),
+        supportsSteps: Boolean(providerConfig.supports_steps),
+        supportsImageEdit: Boolean(providerConfig.supports_image_edit),
+        defaultSize: normalizeOptionalString(providerConfig.default_size),
+        defaultQuality: normalizeOptionalString(providerConfig.default_quality),
+        defaultSteps: Number.isFinite(providerConfig.default_steps) ? Number(providerConfig.default_steps) : 28,
+      })
     })
-    .filter(Boolean)
+  })
+  return items
 })
-const currentSizeOptions = computed(() => {
-  const sizes = currentProviderOption.value?.sizes
-  return Array.isArray(sizes) ? sizes.filter((item) => typeof item === 'string' && item.trim()) : []
+
+const selectedModels = computed(() => {
+  const selected = new Set(selectedModelKeys.value)
+  return modelCatalog.value.filter((item) => selected.has(item.key))
 })
-const currentQualityOptions = computed(() => {
-  const qualities = currentProviderOption.value?.qualities
-  return Array.isArray(qualities) ? qualities.filter((item) => typeof item === 'string' && item.trim()) : []
-})
-const currentSupportsSteps = computed(() => Boolean(currentProviderOption.value?.supports_steps))
-const currentSupportsImageEdit = computed(() => Boolean(currentProviderOption.value?.supports_image_edit))
-const POLL_INTERVAL_MS = 700
 
-function resetProviderDefaults(nextProvider) {
-  const options = providerOptions.value[nextProvider]
-  if (!options || typeof options !== 'object') return
-
-  selectedModels.value = currentModelOptions.value.map((item) => item.id)
-
-  const defaultSize = typeof options.default_size === 'string' ? options.default_size : ''
-  size.value = defaultSize || currentSizeOptions.value[0] || ''
-
-  const defaultQuality = typeof options.default_quality === 'string' ? options.default_quality : ''
-  quality.value = defaultQuality || currentQualityOptions.value[0] || ''
-
-  const defaultSteps = options.default_steps
-  steps.value = Number.isFinite(defaultSteps) ? String(defaultSteps) : '28'
+function buildModelKey(providerName, modelId) {
+  return `${providerName}::${modelId}`
 }
 
-watch(provider, (nextProvider) => {
-  resetProviderDefaults(nextProvider)
-})
+function normalizeStringOptions(value) {
+  if (!Array.isArray(value)) return []
+  return value.filter((item) => typeof item === 'string' && item.trim())
+}
 
-watch(currentSupportsImageEdit, (supportsImageEdit) => {
-  if (!supportsImageEdit) {
-    editImages.value = []
+function normalizeOptionalString(value) {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed || null
+}
+
+function getDefaultSettings(item) {
+  return {
+    size: item.defaultSize || item.sizes[0] || '',
+    quality: item.defaultQuality || item.qualities[0] || '',
+    steps: String(item.defaultSteps > 0 ? item.defaultSteps : 28),
+    useReferenceImages: item.supportsImageEdit,
   }
-})
+}
+
+function ensureSettings(item) {
+  if (selectionSettings.value[item.key]) return
+  selectionSettings.value[item.key] = getDefaultSettings(item)
+}
+
+function initializeSelections() {
+  const keys = []
+  const nextSettings = {}
+
+  modelCatalog.value.forEach((item) => {
+    keys.push(item.key)
+    nextSettings[item.key] = getDefaultSettings(item)
+  })
+
+  selectedModelKeys.value = keys
+  selectionSettings.value = nextSettings
+}
+
+function selectAllModels() {
+  selectedModelKeys.value = modelCatalog.value.map((item) => item.key)
+  modelCatalog.value.forEach((item) => ensureSettings(item))
+}
+
+function clearModelSelection() {
+  selectedModelKeys.value = []
+}
+
+function toggleModelSelection(itemKey) {
+  const selected = new Set(selectedModelKeys.value)
+  if (selected.has(itemKey)) {
+    selected.delete(itemKey)
+  } else {
+    selected.add(itemKey)
+    const item = modelCatalog.value.find((entry) => entry.key === itemKey)
+    if (item) ensureSettings(item)
+  }
+  selectedModelKeys.value = Array.from(selected)
+}
+
+function normalizeStepValue(rawValue) {
+  const value = typeof rawValue === 'string' ? rawValue.trim() : String(rawValue ?? '').trim()
+  if (!value) return undefined
+  const parsed = Number.parseInt(value, 10)
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined
+  return parsed
+}
 
 async function loadProviderOptions() {
   const response = await fetch(`${props.apiBaseUrl}/api/providers`)
@@ -95,23 +148,31 @@ async function loadProviderOptions() {
   }
 
   providerOptions.value = payload
-  const availableProviders = providerNames.value
-  if (!availableProviders.length) {
-    throw new Error('No providers are currently available.')
+  if (!modelCatalog.value.length) {
+    throw new Error('No models are currently available.')
   }
 
-  const nextProvider = availableProviders.includes(provider.value) ? provider.value : availableProviders[0]
-  provider.value = nextProvider
-  resetProviderDefaults(nextProvider)
+  initializeSelections()
+}
+
+function buildSelectionsPayload() {
+  return selectedModels.value.map((item) => {
+    const settings = selectionSettings.value[item.key] || getDefaultSettings(item)
+    const payload = {
+      provider: item.provider,
+      model: item.model,
+      size: settings.size || undefined,
+      quality: settings.quality || undefined,
+      steps: item.supportsSteps ? normalizeStepValue(settings.steps) : undefined,
+      use_reference_images: item.supportsImageEdit ? Boolean(settings.useReferenceImages) : false,
+    }
+    return payload
+  })
 }
 
 async function generateImages() {
   const trimmedPrompt = prompt.value.trim()
   if (!trimmedPrompt || isLoading.value) return
-
-  const enabledModels = currentModelOptions.value
-    .map((option) => option.id)
-    .filter((id) => selectedModels.value.includes(id))
 
   isLoading.value = true
   error.value = ''
@@ -119,10 +180,11 @@ async function generateImages() {
   images.value = []
 
   try {
-    if (!enabledModels.length) {
+    if (!selectedModels.value.length) {
       throw new Error('Select at least one model.')
     }
 
+    const selections = buildSelectionsPayload()
     const response = await fetch(`${props.apiBaseUrl}/api/images/generate`, {
       method: 'POST',
       headers: {
@@ -130,19 +192,14 @@ async function generateImages() {
       },
       body: JSON.stringify({
         prompt: trimmedPrompt,
-        provider: provider.value,
-        models: enabledModels,
-        size: size.value.trim() || undefined,
-        quality: quality.value || undefined,
-        steps: steps.value.trim() ? Number.parseInt(steps.value, 10) : undefined,
-        edit_images:
-          currentSupportsImageEdit.value && editImages.value.length
-            ? editImages.value.map((image) => ({
-                name: image.name,
-                mime_type: image.mime_type,
-                data_url: image.data_url,
-              }))
-            : undefined,
+        selections,
+        edit_images: editImages.value.length
+          ? editImages.value.map((image) => ({
+              name: image.name,
+              mime_type: image.mime_type,
+              data_url: image.data_url,
+            }))
+          : undefined,
       }),
     })
 
@@ -237,7 +294,7 @@ async function handleEditImagesChange(event) {
   }
 
   if (fileList.length > MAX_EDIT_IMAGES) {
-    error.value = `You can attach up to ${MAX_EDIT_IMAGES} edit images.`
+    error.value = `You can attach up to ${MAX_EDIT_IMAGES} reference images.`
   } else {
     error.value = ''
   }
@@ -253,7 +310,7 @@ async function handleEditImagesChange(event) {
     )
   } catch (uploadError) {
     editImages.value = []
-    error.value = uploadError instanceof Error ? uploadError.message : 'Failed to parse edit images.'
+    error.value = uploadError instanceof Error ? uploadError.message : 'Failed to parse reference images.'
   }
 }
 
@@ -270,55 +327,99 @@ onMounted(async () => {
   <div class="view-grid">
     <section class="panel">
       <form class="prompt-form" @submit.prevent="generateImages">
-        <div class="provider-controls">
-          <div class="control-field">
-            <label class="prompt-label" for="provider-select">Provider</label>
-            <select id="provider-select" v-model="provider" :disabled="isLoading">
-              <option v-for="name in providerNames" :key="name" :value="name">{{ name }}</option>
-            </select>
-          </div>
-
-          <div class="control-field">
-            <label class="prompt-label">Models</label>
-            <div class="model-checklist">
-              <label v-for="option in currentModelOptions" :key="option.id" class="check-item">
-                <input v-model="selectedModels" type="checkbox" :value="option.id" :disabled="isLoading" />
-                <span>{{ option.label }}</span>
-              </label>
+        <div class="model-controls">
+          <div class="model-controls-header">
+            <label class="prompt-label">Model Targets</label>
+            <div class="action-row">
+              <button type="button" class="secondary" :disabled="isLoading" @click="selectAllModels">Select All</button>
+              <button type="button" class="secondary" :disabled="isLoading" @click="clearModelSelection">Clear</button>
             </div>
           </div>
 
-          <div class="control-field">
-            <label class="prompt-label" for="size-input">Size</label>
-            <select id="size-input" v-model="size" :disabled="isLoading || !currentSizeOptions.length">
-              <option v-for="option in currentSizeOptions" :key="option" :value="option">{{ option }}</option>
-            </select>
-          </div>
+          <div class="model-grid">
+            <article
+              v-for="item in modelCatalog"
+              :key="item.key"
+              class="model-card"
+              :class="{ selected: selectedModelKeys.includes(item.key) }"
+            >
+              <label class="model-toggle">
+                <input
+                  type="checkbox"
+                  :checked="selectedModelKeys.includes(item.key)"
+                  :disabled="isLoading"
+                  @change="toggleModelSelection(item.key)"
+                />
+                <div>
+                  <p class="model-title">{{ item.label }}</p>
+                  <p class="model-subtitle">{{ item.provider }}</p>
+                </div>
+              </label>
 
-          <div v-if="currentQualityOptions.length" class="control-field">
-            <label class="prompt-label" for="quality-input">Quality</label>
-            <select id="quality-input" v-model="quality" :disabled="isLoading">
-              <option v-for="option in currentQualityOptions" :key="option" :value="option">{{ option }}</option>
-            </select>
-          </div>
+              <div v-if="selectedModelKeys.includes(item.key)" class="model-settings">
+                <div v-if="item.sizes.length" class="control-field">
+                  <label class="prompt-label" :for="`size-${item.key}`">Size</label>
+                  <select
+                    :id="`size-${item.key}`"
+                    v-model="selectionSettings[item.key].size"
+                    :disabled="isLoading"
+                    @focus="ensureSettings(item)"
+                  >
+                    <option v-for="option in item.sizes" :key="option" :value="option">{{ option }}</option>
+                  </select>
+                </div>
 
-          <div v-if="currentSupportsSteps" class="control-field">
-            <label class="prompt-label" for="steps-input">Steps</label>
-            <input id="steps-input" v-model="steps" type="number" min="1" placeholder="28" :disabled="isLoading" />
+                <div v-if="item.qualities.length" class="control-field">
+                  <label class="prompt-label" :for="`quality-${item.key}`">Quality</label>
+                  <select
+                    :id="`quality-${item.key}`"
+                    v-model="selectionSettings[item.key].quality"
+                    :disabled="isLoading"
+                    @focus="ensureSettings(item)"
+                  >
+                    <option v-for="option in item.qualities" :key="option" :value="option">{{ option }}</option>
+                  </select>
+                </div>
+
+                <div v-if="item.supportsSteps" class="control-field">
+                  <label class="prompt-label" :for="`steps-${item.key}`">Steps</label>
+                  <input
+                    :id="`steps-${item.key}`"
+                    v-model="selectionSettings[item.key].steps"
+                    type="number"
+                    min="1"
+                    :disabled="isLoading"
+                    @focus="ensureSettings(item)"
+                  />
+                </div>
+
+                <label v-if="item.supportsImageEdit" class="check-item">
+                  <input
+                    v-model="selectionSettings[item.key].useReferenceImages"
+                    type="checkbox"
+                    :disabled="isLoading"
+                    @focus="ensureSettings(item)"
+                  />
+                  <span>Use reference images</span>
+                </label>
+              </div>
+            </article>
           </div>
         </div>
 
-        <label class="prompt-label" for="prompt-input">Prompt</label>
-        <textarea
-          id="prompt-input"
-          v-model="prompt"
-          placeholder="e.g. A futuristic city skyline at sunrise, cinematic lighting"
-          rows="4"
-          :disabled="isLoading"
-        />
+        <div class="control-field">
+          <label class="prompt-label" for="prompt-input">Prompt</label>
+          <textarea
+            id="prompt-input"
+            v-model="prompt"
+            placeholder="e.g. A futuristic city skyline at sunrise, cinematic lighting"
+            rows="4"
+            :disabled="isLoading"
+          />
+        </div>
 
-        <div v-if="currentSupportsImageEdit" class="control-field">
-          <label class="prompt-label" for="edit-images-input">Edit Images (Optional)</label>
+        <div class="control-field">
+          <label class="prompt-label" for="edit-images-input">Reference Images (Optional)</label>
           <input
             id="edit-images-input"
             type="file"
@@ -327,14 +428,16 @@ onMounted(async () => {
             :disabled="isLoading"
             @change="handleEditImagesChange"
           />
-          <p class="field-hint">Attach up to {{ MAX_EDIT_IMAGES }} source images for GPT image-edit mode.</p>
+          <p class="field-hint">
+            Attach up to {{ MAX_EDIT_IMAGES }} images. They are stored with the run and only used for selected models that support image edit.
+          </p>
           <div v-if="editImageCount" class="edit-images-summary">
             <p class="field-hint">{{ editImageCount }} image{{ editImageCount === 1 ? '' : 's' }} selected</p>
             <button type="button" class="secondary" :disabled="isLoading" @click="clearEditImages">Clear</button>
           </div>
         </div>
 
-        <button type="submit" :disabled="isLoading || !prompt.trim()">
+        <button type="submit" :disabled="isLoading || !prompt.trim() || !selectedModels.length">
           {{ isLoading ? 'Generating...' : 'Generate Images' }}
         </button>
       </form>
@@ -384,13 +487,72 @@ onMounted(async () => {
 
 .prompt-form {
   display: grid;
+  gap: 1rem;
+}
+
+.model-controls {
+  display: grid;
   gap: 0.75rem;
 }
 
-.provider-controls {
+.model-controls-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.action-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.model-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 0.7rem;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+
+.model-card {
+  border: 1px solid #bfd0ea;
+  border-radius: 12px;
+  background: #f8fbff;
+  padding: 0.7rem;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.model-card.selected {
+  border-color: #2b6ecf;
+  box-shadow: 0 0 0 2px rgba(43, 110, 207, 0.15);
+  background: #f1f7ff;
+}
+
+.model-toggle {
+  display: flex;
+  align-items: start;
+  gap: 0.55rem;
+  cursor: pointer;
+}
+
+.model-title {
+  margin: 0;
+  color: #123764;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.model-subtitle {
+  margin: 0.2rem 0 0;
+  color: #58719b;
+  text-transform: capitalize;
+  font-size: 0.82rem;
+}
+
+.model-settings {
+  display: grid;
+  gap: 0.5rem;
 }
 
 .control-field {
@@ -398,13 +560,9 @@ onMounted(async () => {
   gap: 0.35rem;
 }
 
-.model-checklist {
-  display: grid;
-  gap: 0.35rem;
-  border: 1px solid #b9c9e3;
-  border-radius: 10px;
-  padding: 0.5rem 0.6rem;
-  background: #ffffff;
+.prompt-label {
+  font-weight: 600;
+  color: #203a67;
 }
 
 .check-item {
@@ -412,16 +570,11 @@ onMounted(async () => {
   align-items: center;
   gap: 0.45rem;
   color: #1f3f73;
-  font-size: 0.92rem;
+  font-size: 0.9rem;
 }
 
 .check-item input {
   width: auto;
-}
-
-.prompt-label {
-  font-weight: 600;
-  color: #203a67;
 }
 
 textarea,

@@ -3,21 +3,24 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import mimetypes
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from providers.base import ImageGenerationResult
+from providers.base import ImageGenerationResult, InputImage
 
 
 class ImageStore:
     def __init__(self, db_path: str = "data/images.db", image_dir: str = "data/images") -> None:
         self._db_path = Path(db_path)
         self._image_dir = Path(image_dir)
+        self._reference_dir = self._image_dir / "references"
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._image_dir.mkdir(parents=True, exist_ok=True)
+        self._reference_dir.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -48,6 +51,29 @@ class ImageStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS run_records (
+                    run_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    request_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS run_reference_images (
+                    id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    image_path TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    byte_size INTEGER NOT NULL
+                )
+                """
+            )
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(image_generations)").fetchall()}
             if "run_id" not in columns:
                 conn.execute("ALTER TABLE image_generations ADD COLUMN run_id TEXT")
@@ -62,6 +88,8 @@ class ImageStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_image_generations_run_id ON image_generations(run_id)"
             )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_run_records_created_at ON run_records(created_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_run_reference_images_run_id ON run_reference_images(run_id)")
             if "image_base64" not in columns:
                 conn.execute("ALTER TABLE image_generations ADD COLUMN image_base64 TEXT")
                 rows = conn.execute(
@@ -83,6 +111,72 @@ class ImageStore:
                         "UPDATE image_generations SET image_base64 = ? WHERE id = ?",
                         backfill_rows,
                     )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO run_records (run_id, created_at, request_json)
+                SELECT run_id, MIN(created_at), COALESCE(MAX(request_json), '{}')
+                FROM image_generations
+                WHERE run_id IS NOT NULL AND run_id != ''
+                GROUP BY run_id
+                """
+            )
+
+    def create_run(
+        self,
+        run_id: str,
+        request_payload: dict[str, Any],
+        reference_images: tuple[InputImage, ...] = (),
+    ) -> dict[str, Any]:
+        created_at = datetime.now(UTC).isoformat()
+        run_row = {
+            "run_id": run_id,
+            "created_at": created_at,
+            "request_json": json.dumps(request_payload, ensure_ascii=True),
+        }
+
+        reference_rows = []
+        for reference_image in reference_images:
+            reference_id = str(uuid4())
+            extension = self._guess_extension(reference_image.mime_type)
+            image_path = self._reference_dir / f"{reference_id}{extension}"
+            image_path.write_bytes(reference_image.data)
+            reference_rows.append(
+                {
+                    "id": reference_id,
+                    "run_id": run_id,
+                    "created_at": created_at,
+                    "name": reference_image.filename,
+                    "mime_type": reference_image.mime_type,
+                    "image_path": str(image_path),
+                    "sha256": hashlib.sha256(reference_image.data).hexdigest(),
+                    "byte_size": len(reference_image.data),
+                }
+            )
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO run_records (run_id, created_at, request_json)
+                VALUES (:run_id, :created_at, :request_json)
+                """,
+                run_row,
+            )
+            if reference_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO run_reference_images (
+                        id, run_id, created_at, name, mime_type, image_path, sha256, byte_size
+                    ) VALUES (
+                        :id, :run_id, :created_at, :name, :mime_type, :image_path, :sha256, :byte_size
+                    )
+                    """,
+                    reference_rows,
+                )
+
+        run_record = self.get_run(run_id)
+        if run_record is None:
+            raise RuntimeError(f"Failed to create run '{run_id}'")
+        return run_record
 
     def save_generation(
         self,
@@ -182,15 +276,34 @@ class ImageStore:
             return None
         return path
 
+    def reference_image_file_path(self, reference_id: str) -> Path | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT image_path FROM run_reference_images WHERE id = ?",
+                (reference_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        path = Path(row["image_path"])
+        if not path.exists():
+            return None
+        return path
+
     def delete_run(self, run_id: str) -> None:
         with self._connect() as conn:
-            rows = conn.execute(
+            image_rows = conn.execute(
                 "SELECT image_path FROM image_generations WHERE run_id = ?",
                 (run_id,),
             ).fetchall()
+            reference_rows = conn.execute(
+                "SELECT image_path FROM run_reference_images WHERE run_id = ?",
+                (run_id,),
+            ).fetchall()
             conn.execute("DELETE FROM image_generations WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM run_reference_images WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM run_records WHERE run_id = ?", (run_id,))
 
-        for row in rows:
+        for row in [*image_rows, *reference_rows]:
             image_path = Path(row["image_path"])
             try:
                 if image_path.exists():
@@ -203,9 +316,8 @@ class ImageStore:
         with self._connect() as conn:
             run_rows = conn.execute(
                 """
-                SELECT run_id, MAX(created_at) AS created_at, COUNT(*) AS image_count
-                FROM image_generations
-                GROUP BY run_id
+                SELECT run_id, created_at, request_json
+                FROM run_records
                 ORDER BY created_at DESC
                 LIMIT ? OFFSET ?
                 """,
@@ -227,24 +339,56 @@ class ImageStore:
                 """,
                 run_ids,
             ).fetchall()
+            reference_rows = conn.execute(
+                f"""
+                SELECT id, run_id, created_at, name, mime_type, image_path, sha256, byte_size
+                FROM run_reference_images
+                WHERE run_id IN ({placeholders})
+                ORDER BY created_at ASC
+                """,
+                run_ids,
+            ).fetchall()
 
         images_by_run: dict[str, list[dict[str, Any]]] = {run_id: [] for run_id in run_ids}
         for image_row in image_rows:
             image = dict(image_row)
             images_by_run[image["run_id"]].append(image)
+        references_by_run: dict[str, list[dict[str, Any]]] = {run_id: [] for run_id in run_ids}
+        for reference_row in reference_rows:
+            reference = dict(reference_row)
+            references_by_run[reference["run_id"]].append(reference)
 
         runs: list[dict[str, Any]] = []
         for row in run_rows:
             run_id = row["run_id"]
+            run_images = images_by_run.get(run_id, [])
             runs.append(
                 {
                     "run_id": run_id,
                     "created_at": row["created_at"],
-                    "image_count": row["image_count"],
-                    "images": images_by_run.get(run_id, []),
+                    "image_count": len(run_images),
+                    "images": run_images,
+                    "reference_images": references_by_run.get(run_id, []),
+                    "request_json": self._load_json(row["request_json"], default={}),
                 }
             )
         return runs
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT run_id, created_at, request_json
+                FROM run_records
+                WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        run = dict(row)
+        run["request_json"] = self._load_json(run.get("request_json"), default={})
+        return run
 
     def list_run_images(self, run_id: str) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -253,6 +397,19 @@ class ImageStore:
                 SELECT id, run_id, created_at, provider, model, prompt, revised_prompt, size, quality,
                        image_path, mime_type, sha256
                 FROM image_generations
+                WHERE run_id = ?
+                ORDER BY created_at ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_run_reference_images(self, run_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, run_id, created_at, name, mime_type, image_path, sha256, byte_size
+                FROM run_reference_images
                 WHERE run_id = ?
                 ORDER BY created_at ASC
                 """,
@@ -321,3 +478,12 @@ class ImageStore:
         except OSError:
             return None
         return base64.b64encode(image_bytes).decode("ascii")
+
+    @staticmethod
+    def _guess_extension(mime_type: str) -> str:
+        guessed = mimetypes.guess_extension(mime_type.strip().lower() if mime_type else "")
+        if not guessed:
+            return ".bin"
+        if guessed == ".jpe":
+            return ".jpg"
+        return guessed

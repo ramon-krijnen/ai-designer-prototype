@@ -125,14 +125,43 @@ export function parseRunRecord(run, index, apiBaseUrl = '') {
 
   const runId = typeof run.run_id === 'string' ? run.run_id : `run-${index}`
   const createdAt = formatTimestamp(run.created_at)
+  const requestJson = run.request_json && typeof run.request_json === 'object' ? run.request_json : {}
+  const modelTargets = Array.isArray(requestJson.selections)
+    ? requestJson.selections
+        .map((selection) => {
+          if (!selection || typeof selection !== 'object') return null
+          const provider = pickStringField(selection.provider)
+          const model = pickStringField(selection.model)
+          if (!provider && !model) return null
+          return { provider, model }
+        })
+        .filter(Boolean)
+    : []
   const images = Array.isArray(run.images)
     ? run.images.map((item, imageIndex) => parseStoredImageRecord(item, imageIndex, apiBaseUrl)).filter(Boolean)
+    : []
+  const referenceImages = Array.isArray(run.reference_images)
+    ? run.reference_images
+        .map((item, referenceIndex) => {
+          const parsed = parseImageCandidate(item, referenceIndex, apiBaseUrl)
+          if (!parsed) return null
+          return {
+            ...parsed,
+            id: pickStringField(item.id) || `reference-${referenceIndex}`,
+            name: pickStringField(item.name),
+            mimeType: pickStringField(item.mime_type),
+            byteSize: Number.isFinite(item.byte_size) ? Number(item.byte_size) : 0,
+          }
+        })
+        .filter(Boolean)
     : []
 
   return {
     runId,
     createdAt,
     imageCount: typeof run.image_count === 'number' ? run.image_count : images.length,
+    modelTargets,
+    referenceImages,
     images,
   }
 }

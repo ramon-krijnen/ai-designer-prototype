@@ -28,34 +28,34 @@ MAX_EDIT_IMAGES = 16
 MAX_EDIT_IMAGE_BYTES = 50 * 1024 * 1024
 
 
-def _parse_payload(payload: dict[str, Any]) -> tuple[str, ImageGenerationRequest]:
+def _parse_payload(payload: dict[str, Any]) -> tuple[str, tuple[InputImage, ...], list[dict[str, Any]]]:
     prompt = (payload.get("prompt") or "").strip()
     if not prompt:
         raise ValueError("Field 'prompt' is required")
 
-    provider = (payload.get("provider") or "openai").strip().lower()
-    model = (payload.get("model") or "").strip() or None
-    size = (payload.get("size") or "").strip() or None
-    quality = (payload.get("quality") or "").strip() or None
-    steps_raw = payload.get("steps")
-    steps = None
-    if steps_raw is not None and str(steps_raw).strip() != "":
-        try:
-            steps = int(steps_raw)
-        except (TypeError, ValueError):
-            raise ValueError("Field 'steps' must be an integer")
-        if steps <= 0:
-            raise ValueError("Field 'steps' must be greater than 0")
     reference_images = _parse_reference_images(payload.get("edit_images"))
+    selections = _resolve_selections(payload)
+    if not selections:
+        raise ValueError("Select at least one model.")
 
-    return provider, ImageGenerationRequest(
-        prompt=prompt,
-        model=model,
-        size=size,
-        quality=quality,
-        steps=steps,
-        reference_images=reference_images,
-    )
+    normalized_selections = []
+    for selection in selections:
+        provider_name = selection["provider"]
+        if provider_name not in provider_registry.names():
+            supported = ", ".join(sorted(provider_registry.names().keys()))
+            raise ValueError(f"Unsupported provider '{provider_name}'. Supported: {supported}")
+        normalized_selections.append(
+            {
+                **selection,
+                "use_reference_images": (
+                    bool(reference_images)
+                    and bool(selection.get("use_reference_images", True))
+                    and _provider_supports_image_edit(provider_name)
+                ),
+            }
+        )
+
+    return prompt, reference_images, normalized_selections
 
 
 @app.get("/")
@@ -95,6 +95,8 @@ def list_runs() -> tuple[Any, int]:
                 "run_id": run["run_id"],
                 "created_at": run["created_at"],
                 "image_count": run["image_count"],
+                "request_json": run.get("request_json", {}),
+                "reference_images": [_serialize_reference_image(image) for image in run.get("reference_images", [])],
                 "images": [_serialize_record(image) for image in run["images"]],
             }
         )
@@ -106,25 +108,33 @@ def get_run_status(run_id: str) -> tuple[Any, int]:
     with generation_jobs_lock:
         job = generation_jobs.get(run_id)
 
+    run_record = image_store.get_run(run_id)
     images = image_store.list_run_images(run_id)
-    if job is None and not images:
+    reference_images = image_store.list_run_reference_images(run_id)
+    if job is None and run_record is None and not images:
         return jsonify({"error": "Run not found"}), HTTPStatus.NOT_FOUND
 
     serialized_images = [_serialize_record(image) for image in images]
+    serialized_reference_images = [_serialize_reference_image(image) for image in reference_images]
+    run_request = run_record.get("request_json", {}) if run_record else {}
+    inferred_total = _infer_total_from_request(run_request)
     if job is None:
         completed = len(serialized_images)
+        total = max(inferred_total, completed)
         return (
             jsonify(
                 {
                     "run_id": run_id,
-                    "created_at": serialized_images[0]["created_at"] if serialized_images else "",
-                    "updated_at": serialized_images[-1]["created_at"] if serialized_images else "",
-                    "total": completed,
+                    "created_at": run_record["created_at"] if run_record else (serialized_images[0]["created_at"] if serialized_images else ""),
+                    "updated_at": serialized_images[-1]["created_at"] if serialized_images else (run_record["created_at"] if run_record else ""),
+                    "total": total,
                     "completed": completed,
-                    "failed": 0,
+                    "failed": max(total - completed, 0),
                     "done": True,
                     "revised_prompt": "",
                     "errors": [],
+                    "request_json": run_request,
+                    "reference_images": serialized_reference_images,
                     "images": serialized_images,
                 }
             ),
@@ -151,6 +161,8 @@ def get_run_status(run_id: str) -> tuple[Any, int]:
                 "done": job["done"],
                 "revised_prompt": revised_prompt,
                 "errors": list(job["errors"]),
+                "request_json": run_request,
+                "reference_images": serialized_reference_images,
                 "images": serialized_images,
             }
         ),
@@ -181,21 +193,27 @@ def get_image_file(image_id: str) -> Any:
     return send_file(image_path, mimetype="image/png")
 
 
+@app.get("/api/runs/reference-images/<reference_id>/file")
+def get_reference_image_file(reference_id: str) -> Any:
+    image_path = image_store.reference_image_file_path(reference_id)
+    if image_path is None:
+        return jsonify({"error": "Reference image file not found"}), HTTPStatus.NOT_FOUND
+    return send_file(image_path)
+
+
 def _start_async_generation(payload: dict[str, Any]) -> tuple[Any, int]:
     try:
-        provider_name, generation_request = _parse_payload(payload)
-        if generation_request.reference_images and not _provider_supports_image_edit(provider_name):
-            raise ValueError(f"Provider '{provider_name}' does not support image edit inputs")
-        models = _resolve_models(payload, generation_request)
-        request_payload = _sanitize_request_payload(payload, generation_request)
+        prompt, reference_images, selections = _parse_payload(payload)
+        request_payload = _sanitize_request_payload(payload, prompt, selections, reference_images)
         run_id = str(uuid4())
         now = _now_iso()
+        image_store.create_run(run_id, request_payload, reference_images)
         with generation_jobs_lock:
             generation_jobs[run_id] = {
                 "run_id": run_id,
                 "created_at": now,
                 "updated_at": now,
-                "total": len(models),
+                "total": len(selections),
                 "completed": 0,
                 "failed": 0,
                 "done": False,
@@ -204,14 +222,14 @@ def _start_async_generation(payload: dict[str, Any]) -> tuple[Any, int]:
             }
         threading.Thread(
             target=_run_generation_job,
-            args=(run_id, request_payload, provider_name, generation_request, models),
+            args=(run_id, request_payload, prompt, reference_images, selections),
             daemon=True,
         ).start()
         return (
             jsonify(
                 {
                     "run_id": run_id,
-                    "total": len(models),
+                    "total": len(selections),
                     "completed": 0,
                     "failed": 0,
                     "done": False,
@@ -251,21 +269,21 @@ def generate_gemini_image() -> tuple[Any, int]:
 def _run_generation_job(
     run_id: str,
     payload: dict[str, Any],
-    provider_name: str,
-    generation_request: ImageGenerationRequest,
-    models: list[str],
+    prompt: str,
+    reference_images: tuple[InputImage, ...],
+    selections: list[dict[str, Any]],
 ) -> None:
     futures = []
     try:
-        for model_name in models:
+        for selection in selections:
             futures.append(
                 generation_executor.submit(
                     _generate_single_image,
                     run_id,
                     payload,
-                    provider_name,
-                    generation_request,
-                    model_name,
+                    prompt,
+                    reference_images,
+                    selection,
                 )
             )
 
@@ -309,37 +327,116 @@ def _run_generation_job(
 def _generate_single_image(
     run_id: str,
     payload: dict[str, Any],
-    provider_name: str,
-    generation_request: ImageGenerationRequest,
-    model_name: str,
+    prompt: str,
+    reference_images: tuple[InputImage, ...],
+    selection: dict[str, Any],
 ) -> dict[str, Any]:
+    provider_name = selection["provider"]
     provider = provider_registry.get(provider_name)
     request_for_model = ImageGenerationRequest(
-        prompt=generation_request.prompt,
-        model=model_name or None,
-        size=generation_request.size,
-        quality=generation_request.quality,
-        steps=generation_request.steps,
-        reference_images=generation_request.reference_images,
+        prompt=prompt,
+        model=selection.get("model"),
+        size=selection.get("size"),
+        quality=selection.get("quality"),
+        steps=selection.get("steps"),
+        reference_images=reference_images if selection.get("use_reference_images") else (),
     )
     result = provider.generate(request_for_model)
     image_store.save_generation(payload, result, run_id=run_id)
     return {"revised_prompt": result.revised_prompt}
 
 
-def _resolve_models(payload: dict[str, Any], generation_request: ImageGenerationRequest) -> list[str]:
-    models_raw = payload.get("models")
+def _resolve_selections(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_selections = payload.get("selections")
+    selections: list[dict[str, Any]] = []
+    if isinstance(raw_selections, list) and raw_selections:
+        for index, raw_selection in enumerate(raw_selections, start=1):
+            selections.append(_parse_selection(raw_selection, index))
+        return selections
+
+    provider = str(payload.get("provider") or "openai").strip().lower()
+    size = _optional_str(payload.get("size"))
+    quality = _optional_str(payload.get("quality"))
+    steps = _parse_steps(payload.get("steps"), field_name="steps")
+    model = _optional_str(payload.get("model"))
+    models = _parse_model_list(payload.get("models"))
+    resolved_models = [model] if model else (models or [None])
+    for model_name in resolved_models:
+        selections.append(
+            {
+                "provider": provider,
+                "model": model_name,
+                "size": size,
+                "quality": quality,
+                "steps": steps,
+                "use_reference_images": True,
+            }
+        )
+    return selections
+
+
+def _parse_selection(raw_selection: Any, index: int) -> dict[str, Any]:
+    if not isinstance(raw_selection, dict):
+        raise ValueError(f"Field 'selections[{index - 1}]' must be an object")
+    provider_name = _optional_str(raw_selection.get("provider"))
+    if not provider_name:
+        raise ValueError(f"Field 'selections[{index - 1}].provider' is required")
+    model_name = _optional_str(raw_selection.get("model"))
+    return {
+        "provider": provider_name.lower(),
+        "model": model_name,
+        "size": _optional_str(raw_selection.get("size")),
+        "quality": _optional_str(raw_selection.get("quality")),
+        "steps": _parse_steps(raw_selection.get("steps"), field_name=f"selections[{index - 1}].steps"),
+        "use_reference_images": _optional_bool(raw_selection.get("use_reference_images"), default=True),
+    }
+
+
+def _parse_model_list(raw_models: Any) -> list[str]:
+    if not isinstance(raw_models, list):
+        return []
     models: list[str] = []
-    if isinstance(models_raw, list):
-        for model_entry in models_raw:
-            model_name = str(model_entry).strip()
-            if model_name:
-                models.append(model_name)
-    if generation_request.model:
-        models = [generation_request.model]
-    if not models:
-        models = [generation_request.model] if generation_request.model else [""]
+    for raw_model in raw_models:
+        model_name = _optional_str(raw_model)
+        if model_name:
+            models.append(model_name)
     return models
+
+
+def _optional_str(raw_value: Any) -> str | None:
+    if raw_value is None:
+        return None
+    trimmed = str(raw_value).strip()
+    return trimmed or None
+
+
+def _parse_steps(raw_value: Any, *, field_name: str) -> int | None:
+    if raw_value is None:
+        return None
+    raw_text = str(raw_value).strip()
+    if not raw_text:
+        return None
+    try:
+        steps = int(raw_text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Field '{field_name}' must be an integer") from exc
+    if steps <= 0:
+        raise ValueError(f"Field '{field_name}' must be greater than 0")
+    return steps
+
+
+def _optional_bool(raw_value: Any, *, default: bool) -> bool:
+    if raw_value is None:
+        return default
+    if isinstance(raw_value, bool):
+        return raw_value
+    if isinstance(raw_value, str):
+        normalized = raw_value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return default
 
 
 def _now_iso() -> str:
@@ -463,17 +560,31 @@ def _normalize_mime_type(value: Any) -> str | None:
 
 def _sanitize_request_payload(
     payload: dict[str, Any],
-    generation_request: ImageGenerationRequest,
+    prompt: str,
+    selections: list[dict[str, Any]],
+    reference_images: tuple[InputImage, ...],
 ) -> dict[str, Any]:
-    sanitized = {key: value for key, value in payload.items() if key != "edit_images"}
-    if generation_request.reference_images:
+    sanitized = {key: value for key, value in payload.items() if key not in {"edit_images", "selections", "models"}}
+    sanitized["prompt"] = prompt
+    sanitized["selections"] = [
+        {
+            "provider": selection["provider"],
+            "model": selection.get("model"),
+            "size": selection.get("size"),
+            "quality": selection.get("quality"),
+            "steps": selection.get("steps"),
+            "use_reference_images": bool(selection.get("use_reference_images")),
+        }
+        for selection in selections
+    ]
+    if reference_images:
         sanitized["edit_images"] = [
             {
                 "name": image.filename,
                 "mime_type": image.mime_type,
                 "bytes": len(image.data),
             }
-            for image in generation_request.reference_images
+            for image in reference_images
         ]
     return sanitized
 
@@ -483,6 +594,20 @@ def _serialize_record(record: dict[str, Any]) -> dict[str, Any]:
     image_id = serialized["id"]
     serialized["image_url"] = url_for("get_image_file", image_id=image_id)
     return serialized
+
+
+def _serialize_reference_image(record: dict[str, Any]) -> dict[str, Any]:
+    serialized = dict(record)
+    reference_id = serialized["id"]
+    serialized["image_url"] = url_for("get_reference_image_file", reference_id=reference_id)
+    return serialized
+
+
+def _infer_total_from_request(request_payload: dict[str, Any]) -> int:
+    selections = request_payload.get("selections")
+    if isinstance(selections, list):
+        return len(selections)
+    return 0
 
 
 if __name__ == "__main__":
