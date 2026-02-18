@@ -18,6 +18,7 @@ Monorepo for an AI image generation app with:
 - Node.js 20+
 - npm
 - OpenAI API key (for OpenAI provider)
+- Gemini API key (for Gemini provider)
 - Krea API key (for Krea provider)
 
 ## Backend Setup
@@ -30,7 +31,18 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Update `backend/.env` with provider keys you use (`OPENAI_API_KEY` and/or `KREA_API_KEY`).
+Update `backend/.env` with provider credentials you use.
+For Gemini, preferred:
+- `GEMINI_API_KEY`
+
+Gemini fallback mode (ADC/Vertex):
+- `GOOGLE_CLOUD_PROJECT`
+- `GOOGLE_CLOUD_LOCATION` (for example `global`)
+- and authenticate with ADC:
+- `gcloud auth application-default login`, or
+- `GOOGLE_APPLICATION_CREDENTIALS` with a service account key file path
+
+OpenAI/Krea still use `OPENAI_API_KEY` and `KREA_API_KEY`.
 For Krea async jobs you can tune `KREA_POLL_INTERVAL_SECONDS` and `KREA_JOB_TIMEOUT_SECONDS`.
 If Krea returns image URLs on additional hosts/CDNs, set `KREA_IMAGE_HOST_ALLOWLIST` as a comma-separated host list.
 
@@ -69,6 +81,7 @@ By default, Vite proxies `/api` requests to `http://127.0.0.1:5000`.
 - `GET /` health check
 - `POST /api/images/generate` generate an image
 - `POST /api/images/openai` generate an image via OpenAI provider
+- `POST /api/images/gemini` generate an image via Gemini provider
 - `POST /api/images/krea` generate an image via Krea provider
 - `GET /api/providers` list provider capabilities (models/sizes/qualities) for frontend configuration
 - `GET /api/images` list generated images
@@ -129,6 +142,31 @@ curl -X POST http://127.0.0.1:5000/api/images/krea \
 curl -X POST http://127.0.0.1:5000/api/images/krea \
   -H "Content-Type: application/json" \
   -d '{"prompt":"a serene mountain landscape at sunset","model":"flux_1_dev","size":"1024x576","steps":28}'
+```
+
+Gemini examples:
+
+```bash
+# Nano Banana (Gemini 2.5 image preview)
+curl -X POST http://127.0.0.1:5000/api/images/gemini \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"a cinematic food photo of ramen on a rainy neon street","model":"gemini-2.5-flash-image"}'
+
+# Image edit style request with one source image
+curl -X POST http://127.0.0.1:5000/api/images/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider":"gemini",
+    "model":"nano-banana",
+    "prompt":"Turn this into a flat illustration poster style",
+    "edit_images":[
+      {
+        "name":"source.png",
+        "mime_type":"image/png",
+        "data_url":"data:image/png;base64,<BASE64_IMAGE_DATA>"
+      }
+    ]
+  }'
 ```
 
 ## Build Frontend

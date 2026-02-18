@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Mapping
 
 from providers.base import ImageProvider
+from providers.gemini import GeminiImageProvider
 from providers.krea import KreaImageProvider
 from providers.openai import OpenAIImageProvider
 
@@ -12,6 +13,7 @@ class ProviderRegistry:
         self._providers: dict[str, type[ImageProvider]] = {
             "openai": OpenAIImageProvider,
             "krea": KreaImageProvider,
+            "gemini": GeminiImageProvider,
         }
 
     def get(self, name: str) -> ImageProvider:

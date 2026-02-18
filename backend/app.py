@@ -241,6 +241,13 @@ def generate_krea_image() -> tuple[Any, int]:
     return _start_async_generation(payload)
 
 
+@app.post("/api/images/gemini")
+def generate_gemini_image() -> tuple[Any, int]:
+    payload = request.get_json(silent=True) or {}
+    payload["provider"] = "gemini"
+    return _start_async_generation(payload)
+
+
 def _run_generation_job(
     run_id: str,
     payload: dict[str, Any],
