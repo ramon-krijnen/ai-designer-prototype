@@ -26,6 +26,7 @@ class KreaImageProvider:
         "default_quality": None,
         "supports_steps": True,
         "default_steps": 28,
+        "supports_image_edit": False,
     }
 
     _MODEL_PATH_ALIASES = {

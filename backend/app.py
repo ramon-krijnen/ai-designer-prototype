@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -9,7 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from flask import Flask, jsonify, request, send_file, url_for
-from providers.base import ImageGenerationRequest
+from providers.base import ImageGenerationRequest, InputImage
 from providers.registry import ProviderRegistry
 from storage import ImageStore
 
@@ -22,6 +24,9 @@ image_store = ImageStore(
 generation_executor = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("GENERATION_WORKERS", "4"))))
 generation_jobs: dict[str, dict[str, Any]] = {}
 generation_jobs_lock = threading.Lock()
+MAX_EDIT_IMAGES = 16
+MAX_EDIT_IMAGE_BYTES = 50 * 1024 * 1024
+
 
 def _parse_payload(payload: dict[str, Any]) -> tuple[str, ImageGenerationRequest]:
     prompt = (payload.get("prompt") or "").strip()
@@ -41,6 +46,7 @@ def _parse_payload(payload: dict[str, Any]) -> tuple[str, ImageGenerationRequest
             raise ValueError("Field 'steps' must be an integer")
         if steps <= 0:
             raise ValueError("Field 'steps' must be greater than 0")
+    reference_images = _parse_reference_images(payload.get("edit_images"))
 
     return provider, ImageGenerationRequest(
         prompt=prompt,
@@ -48,6 +54,7 @@ def _parse_payload(payload: dict[str, Any]) -> tuple[str, ImageGenerationRequest
         size=size,
         quality=quality,
         steps=steps,
+        reference_images=reference_images,
     )
 
 
@@ -177,7 +184,10 @@ def get_image_file(image_id: str) -> Any:
 def _start_async_generation(payload: dict[str, Any]) -> tuple[Any, int]:
     try:
         provider_name, generation_request = _parse_payload(payload)
+        if generation_request.reference_images and not _provider_supports_image_edit(provider_name):
+            raise ValueError(f"Provider '{provider_name}' does not support image edit inputs")
         models = _resolve_models(payload, generation_request)
+        request_payload = _sanitize_request_payload(payload, generation_request)
         run_id = str(uuid4())
         now = _now_iso()
         with generation_jobs_lock:
@@ -194,7 +204,7 @@ def _start_async_generation(payload: dict[str, Any]) -> tuple[Any, int]:
             }
         threading.Thread(
             target=_run_generation_job,
-            args=(run_id, payload, provider_name, generation_request, models),
+            args=(run_id, request_payload, provider_name, generation_request, models),
             daemon=True,
         ).start()
         return (
@@ -303,6 +313,7 @@ def _generate_single_image(
         size=generation_request.size,
         quality=generation_request.quality,
         steps=generation_request.steps,
+        reference_images=generation_request.reference_images,
     )
     result = provider.generate(request_for_model)
     image_store.save_generation(payload, result, run_id=run_id)
@@ -326,6 +337,138 @@ def _resolve_models(payload: dict[str, Any], generation_request: ImageGeneration
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _provider_supports_image_edit(provider_name: str) -> bool:
+    provider_cls = provider_registry.names().get(provider_name)
+    if provider_cls is None:
+        return False
+    options = getattr(provider_cls, "OPTIONS", None)
+    if not isinstance(options, dict):
+        return False
+    return bool(options.get("supports_image_edit"))
+
+
+def _parse_reference_images(raw_value: Any) -> tuple[InputImage, ...]:
+    if raw_value is None:
+        return ()
+    if not isinstance(raw_value, list):
+        raise ValueError("Field 'edit_images' must be an array")
+    if len(raw_value) > MAX_EDIT_IMAGES:
+        raise ValueError(f"Field 'edit_images' supports up to {MAX_EDIT_IMAGES} images")
+
+    parsed_images: list[InputImage] = []
+    for index, value in enumerate(raw_value, start=1):
+        parsed_images.append(_parse_reference_image(value, index))
+    return tuple(parsed_images)
+
+
+def _parse_reference_image(raw_value: Any, index: int) -> InputImage:
+    fallback_filename = f"reference-{index}.png"
+    if isinstance(raw_value, dict):
+        filename = _normalize_filename(raw_value.get("name"), fallback_filename)
+        mime_type = _normalize_mime_type(raw_value.get("mime_type")) or "image/png"
+        data_url = raw_value.get("data_url")
+        base64_value = raw_value.get("base64")
+        if isinstance(data_url, str) and data_url.strip():
+            mime_from_data_url, encoded_data = _split_data_url(data_url.strip(), index)
+            if mime_from_data_url:
+                mime_type = mime_from_data_url
+            return InputImage(
+                data=_decode_base64_image(encoded_data, index),
+                filename=filename,
+                mime_type=mime_type,
+            )
+        if isinstance(base64_value, str) and base64_value.strip():
+            return InputImage(
+                data=_decode_base64_image(base64_value, index),
+                filename=filename,
+                mime_type=mime_type,
+            )
+        raise ValueError(f"Field 'edit_images[{index - 1}]' must include 'data_url' or 'base64'")
+
+    if isinstance(raw_value, str):
+        trimmed = raw_value.strip()
+        if not trimmed:
+            raise ValueError(f"Field 'edit_images[{index - 1}]' cannot be empty")
+        if trimmed.lower().startswith("data:"):
+            mime_type, encoded_data = _split_data_url(trimmed, index)
+            return InputImage(
+                data=_decode_base64_image(encoded_data, index),
+                filename=fallback_filename,
+                mime_type=mime_type or "image/png",
+            )
+        return InputImage(
+            data=_decode_base64_image(trimmed, index),
+            filename=fallback_filename,
+            mime_type="image/png",
+        )
+
+    raise ValueError(f"Field 'edit_images[{index - 1}]' must be a string or object")
+
+
+def _split_data_url(data_url: str, index: int) -> tuple[str | None, str]:
+    header, separator, encoded_data = data_url.partition(",")
+    if separator != ",":
+        raise ValueError(f"Field 'edit_images[{index - 1}]' contains an invalid data URL")
+    if ";base64" not in header.lower():
+        raise ValueError(f"Field 'edit_images[{index - 1}]' must use base64 data URLs")
+    mime_type = _normalize_mime_type(header[5:].split(";", 1)[0])
+    return mime_type, encoded_data
+
+
+def _decode_base64_image(value: str, index: int) -> bytes:
+    normalized = "".join(value.strip().split())
+    if not normalized:
+        raise ValueError(f"Field 'edit_images[{index - 1}]' cannot be empty")
+    try:
+        decoded = base64.b64decode(normalized, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"Field 'edit_images[{index - 1}]' contains invalid base64 image data") from exc
+    if not decoded:
+        raise ValueError(f"Field 'edit_images[{index - 1}]' cannot be empty")
+    if len(decoded) > MAX_EDIT_IMAGE_BYTES:
+        max_size_mb = MAX_EDIT_IMAGE_BYTES // (1024 * 1024)
+        raise ValueError(f"Field 'edit_images[{index - 1}]' exceeds the {max_size_mb}MB size limit")
+    return decoded
+
+
+def _normalize_filename(value: Any, fallback: str) -> str:
+    if not isinstance(value, str):
+        return fallback
+    trimmed = value.strip()
+    if not trimmed:
+        return fallback
+    sanitized = trimmed.replace("\\", "_").replace("/", "_")
+    return sanitized or fallback
+
+
+def _normalize_mime_type(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip().lower()
+    if not trimmed:
+        return None
+    if "/" not in trimmed:
+        return None
+    return trimmed
+
+
+def _sanitize_request_payload(
+    payload: dict[str, Any],
+    generation_request: ImageGenerationRequest,
+) -> dict[str, Any]:
+    sanitized = {key: value for key, value in payload.items() if key != "edit_images"}
+    if generation_request.reference_images:
+        sanitized["edit_images"] = [
+            {
+                "name": image.filename,
+                "mime_type": image.mime_type,
+                "bytes": len(image.data),
+            }
+            for image in generation_request.reference_images
+        ]
+    return sanitized
 
 
 def _serialize_record(record: dict[str, Any]) -> dict[str, Any]:

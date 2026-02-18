@@ -75,6 +75,7 @@ By default, Vite proxies `/api` requests to `http://127.0.0.1:5000`.
 - `GET /api/runs` list grouped generation runs (one run can contain multiple model outputs)
 - `GET /api/images/:image_id` get metadata for one image
 - `GET /api/images/:image_id/file` get the image file
+- `edit_images` (optional): for GPT-image models, pass one or more source images to run image-edit generation
 
 Example request:
 
@@ -90,6 +91,25 @@ Multi-model single-run request:
 curl -X POST http://127.0.0.1:5000/api/images/generate \
   -H "Content-Type: application/json" \
   -d '{"provider":"krea","prompt":"a serene mountain landscape at sunset","models":["qwen_2512","z_image","flux_1_dev"],"size":"1024x1024","steps":28}'
+```
+
+OpenAI image-edit request (single or multiple source images):
+
+```bash
+curl -X POST http://127.0.0.1:5000/api/images/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider":"openai",
+    "model":"gpt-image-1.5",
+    "prompt":"Turn this product shot into a magazine ad scene",
+    "edit_images":[
+      {
+        "name":"product.png",
+        "mime_type":"image/png",
+        "data_url":"data:image/png;base64,<BASE64_IMAGE_DATA>"
+      }
+    ]
+  }'
 ```
 
 Krea examples:

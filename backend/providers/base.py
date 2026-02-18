@@ -5,12 +5,20 @@ from typing import Protocol
 
 
 @dataclass(frozen=True)
+class InputImage:
+    data: bytes
+    filename: str
+    mime_type: str = "image/png"
+
+
+@dataclass(frozen=True)
 class ImageGenerationRequest:
     prompt: str
     model: str | None = None
     size: str | None = None
     quality: str | None = None
     steps: int | None = None
+    reference_images: tuple[InputImage, ...] = ()
 
 
 @dataclass(frozen=True)

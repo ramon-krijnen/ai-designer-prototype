@@ -20,6 +20,7 @@ class OpenAIImageProvider:
         "default_size": "1024x1024",
         "default_quality": "medium",
         "supports_steps": False,
+        "supports_image_edit": True,
     }
 
     def __init__(self) -> None:
@@ -44,12 +45,25 @@ class OpenAIImageProvider:
         if quality not in allowed_qualities:
             raise ValueError(f"Unsupported OpenAI quality '{quality}'")
 
-        result = self._client.images.generate(
-            model=model,
-            prompt=request.prompt,
-            size=size,
-            quality=quality,
-        )
+        image_uploads = [
+            (image.filename, image.data, image.mime_type)
+            for image in request.reference_images
+        ]
+        if image_uploads:
+            result = self._client.images.edit(
+                model=model,
+                prompt=request.prompt,
+                size=size,
+                quality=quality,
+                image=image_uploads,
+            )
+        else:
+            result = self._client.images.generate(
+                model=model,
+                prompt=request.prompt,
+                size=size,
+                quality=quality,
+            )
         image = result.data[0]
 
         return ImageGenerationResult(

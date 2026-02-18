@@ -23,8 +23,11 @@ const steps = ref('28')
 const quality = ref('')
 const selectedModels = ref([])
 const providerOptions = ref({})
+const editImages = ref([])
 
+const MAX_EDIT_IMAGES = 16
 const imageCount = computed(() => images.value.length)
+const editImageCount = computed(() => editImages.value.length)
 const providerNames = computed(() => Object.keys(providerOptions.value))
 const currentProviderOption = computed(() => providerOptions.value[provider.value] || null)
 const currentModelOptions = computed(() => {
@@ -55,6 +58,7 @@ const currentQualityOptions = computed(() => {
   return Array.isArray(qualities) ? qualities.filter((item) => typeof item === 'string' && item.trim()) : []
 })
 const currentSupportsSteps = computed(() => Boolean(currentProviderOption.value?.supports_steps))
+const currentSupportsImageEdit = computed(() => Boolean(currentProviderOption.value?.supports_image_edit))
 const POLL_INTERVAL_MS = 700
 
 function resetProviderDefaults(nextProvider) {
@@ -75,6 +79,12 @@ function resetProviderDefaults(nextProvider) {
 
 watch(provider, (nextProvider) => {
   resetProviderDefaults(nextProvider)
+})
+
+watch(currentSupportsImageEdit, (supportsImageEdit) => {
+  if (!supportsImageEdit) {
+    editImages.value = []
+  }
 })
 
 async function loadProviderOptions() {
@@ -125,6 +135,14 @@ async function generateImages() {
         size: size.value.trim() || undefined,
         quality: quality.value || undefined,
         steps: steps.value.trim() ? Number.parseInt(steps.value, 10) : undefined,
+        edit_images:
+          currentSupportsImageEdit.value && editImages.value.length
+            ? editImages.value.map((image) => ({
+                name: image.name,
+                mime_type: image.mime_type,
+                data_url: image.data_url,
+              }))
+            : undefined,
       }),
     })
 
@@ -190,6 +208,55 @@ function openImage(image) {
   emit('open-image', image)
 }
 
+function clearEditImages() {
+  editImages.value = []
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        reject(new Error(`Unable to read '${file.name}'.`))
+        return
+      }
+      resolve(reader.result)
+    }
+    reader.onerror = () => {
+      reject(new Error(`Unable to read '${file.name}'.`))
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+async function handleEditImagesChange(event) {
+  const fileList = Array.from(event?.target?.files || [])
+  if (!fileList.length) {
+    editImages.value = []
+    return
+  }
+
+  if (fileList.length > MAX_EDIT_IMAGES) {
+    error.value = `You can attach up to ${MAX_EDIT_IMAGES} edit images.`
+  } else {
+    error.value = ''
+  }
+
+  const limitedFiles = fileList.slice(0, MAX_EDIT_IMAGES)
+  try {
+    editImages.value = await Promise.all(
+      limitedFiles.map(async (file) => ({
+        name: file.name || 'reference-image.png',
+        mime_type: file.type || 'image/png',
+        data_url: await readFileAsDataUrl(file),
+      })),
+    )
+  } catch (uploadError) {
+    editImages.value = []
+    error.value = uploadError instanceof Error ? uploadError.message : 'Failed to parse edit images.'
+  }
+}
+
 onMounted(async () => {
   try {
     await loadProviderOptions()
@@ -249,6 +316,24 @@ onMounted(async () => {
           rows="4"
           :disabled="isLoading"
         />
+
+        <div v-if="currentSupportsImageEdit" class="control-field">
+          <label class="prompt-label" for="edit-images-input">Edit Images (Optional)</label>
+          <input
+            id="edit-images-input"
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            multiple
+            :disabled="isLoading"
+            @change="handleEditImagesChange"
+          />
+          <p class="field-hint">Attach up to {{ MAX_EDIT_IMAGES }} source images for GPT image-edit mode.</p>
+          <div v-if="editImageCount" class="edit-images-summary">
+            <p class="field-hint">{{ editImageCount }} image{{ editImageCount === 1 ? '' : 's' }} selected</p>
+            <button type="button" class="secondary" :disabled="isLoading" @click="clearEditImages">Clear</button>
+          </div>
+        </div>
+
         <button type="submit" :disabled="isLoading || !prompt.trim()">
           {{ isLoading ? 'Generating...' : 'Generate Images' }}
         </button>
@@ -376,6 +461,30 @@ button {
 button:disabled {
   background: #7894c0;
   cursor: not-allowed;
+}
+
+button.secondary {
+  background: #eaf1ff;
+  border: 1px solid #b9c9e3;
+  color: #194790;
+}
+
+button.secondary:disabled {
+  background: #f2f5fb;
+  color: #7f92b4;
+}
+
+.field-hint {
+  margin: 0;
+  color: #5f7498;
+  font-size: 0.82rem;
+}
+
+.edit-images-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
 }
 
 .message {
