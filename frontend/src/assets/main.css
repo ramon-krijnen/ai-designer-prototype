@@ -1,3 +1,19 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700&display=swap');
+
+:root {
+  --bg: #f3ede2;
+  --surface: #fffaf0;
+  --surface-strong: #fef6e8;
+  --ink: #2e1f14;
+  --ink-soft: #705948;
+  --accent: #0a7a65;
+  --accent-strong: #045245;
+  --line: #d8c6b0;
+  --radius-lg: 16px;
+  --radius-md: 12px;
+  --shadow-soft: 0 12px 40px rgba(58, 31, 11, 0.08);
+}
+
 *,
 *::before,
 *::after {
@@ -7,7 +23,14 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background: linear-gradient(160deg, #f3f7ff 0%, #edf2fb 100%);
-  color: #1a2d4f;
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  color: var(--ink);
+  font-family: 'Manrope', 'Segoe UI', Tahoma, sans-serif;
+  background:
+    radial-gradient(circle at 10% 12%, rgba(189, 143, 95, 0.18), transparent 35%),
+    radial-gradient(circle at 88% 4%, rgba(31, 126, 108, 0.2), transparent 28%),
+    linear-gradient(165deg, #f7f1e6 0%, #f2ebdf 52%, #eee4d7 100%);
+}
+
+#app {
+  min-height: 100vh;
 }

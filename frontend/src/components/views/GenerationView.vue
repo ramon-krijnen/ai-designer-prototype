@@ -73,6 +73,18 @@ const selectedModels = computed(() => {
   return modelCatalog.value.filter((item) => selected.has(item.key))
 })
 
+const selectedEditCapableCount = computed(() => selectedModels.value.filter((item) => item.supportsImageEdit).length)
+
+const selectedUsingReferenceCount = computed(() =>
+  selectedModels.value.filter((item) => {
+    if (!item.supportsImageEdit) return false
+    const settings = selectionSettings.value[item.key]
+    return Boolean(settings?.useReferenceImages)
+  }).length,
+)
+
+const promptCharCount = computed(() => prompt.value.trim().length)
+
 function buildModelKey(providerName, modelId) {
   return `${providerName}::${modelId}`
 }
@@ -162,7 +174,7 @@ async function loadProviderOptions() {
 function buildSelectionsPayload() {
   return selectedModels.value.map((item) => {
     const settings = selectionSettings.value[item.key] || getDefaultSettings(item)
-    const payload = {
+    return {
       provider: item.provider,
       model: item.model,
       size: settings.size || undefined,
@@ -170,7 +182,6 @@ function buildSelectionsPayload() {
       steps: item.supportsSteps ? normalizeStepValue(settings.steps) : undefined,
       use_reference_images: item.supportsImageEdit ? Boolean(settings.useReferenceImages) : false,
     }
-    return payload
   })
 }
 
@@ -331,9 +342,14 @@ onMounted(async () => {
   <div class="view-grid">
     <section class="panel">
       <form class="prompt-form" @submit.prevent="generateImages">
+        <div class="section-label">
+          <span class="section-label-kicker">Step 1</span>
+          <h2>Model Targets</h2>
+        </div>
+
         <div class="model-controls">
           <div class="model-controls-header">
-            <label class="prompt-label">Model Targets</label>
+            <p class="summary-line">{{ selectedModels.length }} selected · {{ providerNames.length }} providers</p>
             <div class="action-row">
               <button type="button" class="secondary" :disabled="isLoading" @click="selectAllModels">Select All</button>
               <button type="button" class="secondary" :disabled="isLoading" @click="clearModelSelection">Clear</button>
@@ -411,15 +427,26 @@ onMounted(async () => {
           </div>
         </div>
 
+        <div class="selection-summary">
+          <p><strong>{{ selectedEditCapableCount }}</strong> selected models can consume references.</p>
+          <p><strong>{{ selectedUsingReferenceCount }}</strong> currently set to use reference images.</p>
+        </div>
+
+        <div class="section-label">
+          <span class="section-label-kicker">Step 2</span>
+          <h2>Prompt & References</h2>
+        </div>
+
         <div class="control-field">
           <label class="prompt-label" for="prompt-input">Prompt</label>
           <textarea
             id="prompt-input"
             v-model="prompt"
-            placeholder="e.g. A futuristic city skyline at sunrise, cinematic lighting"
+            placeholder="e.g. Brutalist museum atrium with suspended gardens, cinematic light shafts"
             rows="4"
             :disabled="isLoading"
           />
+          <p class="field-hint">{{ promptCharCount }} characters</p>
         </div>
 
         <div class="control-field">
@@ -433,7 +460,7 @@ onMounted(async () => {
             @change="handleEditImagesChange"
           />
           <p class="field-hint">
-            Attach up to {{ MAX_EDIT_IMAGES }} images. They are stored with the run and only used for selected models that support image edit.
+            Attach up to {{ MAX_EDIT_IMAGES }} images. They are persisted with the run and only used for models with edit support.
           </p>
           <div v-if="editImageCount" class="edit-images-summary">
             <p class="field-hint">{{ editImageCount }} image{{ editImageCount === 1 ? '' : 's' }} selected</p>
@@ -456,7 +483,7 @@ onMounted(async () => {
         <span v-if="imageCount">{{ imageCount }} image{{ imageCount === 1 ? '' : 's' }}</span>
       </div>
 
-      <p v-if="!imageCount && !isLoading" class="empty-state">No images yet. Submit a prompt to get started.</p>
+      <p v-if="!imageCount && !isLoading" class="empty-state">No images yet. Configure your targets and run a prompt.</p>
 
       <div v-if="imageCount" class="image-grid">
         <article v-for="(image, index) in images" :key="`${image.src}-${index}`" class="image-card">
@@ -483,15 +510,36 @@ onMounted(async () => {
 
 .panel,
 .results {
-  background: #ffffff;
-  border: 1px solid #dbe3ef;
-  border-radius: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft);
   padding: 1rem;
 }
 
 .prompt-form {
   display: grid;
   gap: 1rem;
+}
+
+.section-label {
+  display: grid;
+  gap: 0.22rem;
+}
+
+.section-label-kicker {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.68rem;
+  color: #7f5d43;
+  font-weight: 700;
+}
+
+.section-label h2 {
+  margin: 0;
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: 1.25rem;
+  color: #2c2119;
 }
 
 .model-controls {
@@ -507,6 +555,12 @@ onMounted(async () => {
   flex-wrap: wrap;
 }
 
+.summary-line {
+  margin: 0;
+  color: #6c5442;
+  font-size: 0.88rem;
+}
+
 .action-row {
   display: flex;
   gap: 0.5rem;
@@ -515,22 +569,28 @@ onMounted(async () => {
 .model-grid {
   display: grid;
   gap: 0.75rem;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
 }
 
 .model-card {
-  border: 1px solid #bfd0ea;
-  border-radius: 12px;
-  background: #f8fbff;
-  padding: 0.7rem;
+  border: 1px solid #d9c8b5;
+  border-radius: var(--radius-md);
+  background: var(--surface-strong);
+  padding: 0.72rem;
   display: grid;
   gap: 0.6rem;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.model-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 28px rgba(79, 45, 21, 0.1);
 }
 
 .model-card.selected {
-  border-color: #2b6ecf;
-  box-shadow: 0 0 0 2px rgba(43, 110, 207, 0.15);
-  background: #f1f7ff;
+  border-color: #0b7f68;
+  box-shadow: 0 0 0 2px rgba(11, 127, 104, 0.2);
+  background: #f1fff8;
 }
 
 .model-toggle {
@@ -542,14 +602,14 @@ onMounted(async () => {
 
 .model-title {
   margin: 0;
-  color: #123764;
-  font-weight: 600;
+  color: #2a2019;
+  font-weight: 700;
   line-height: 1.25;
 }
 
 .model-subtitle {
-  margin: 0.2rem 0 0;
-  color: #58719b;
+  margin: 0.15rem 0 0;
+  color: #6f5a4a;
   text-transform: capitalize;
   font-size: 0.82rem;
 }
@@ -559,21 +619,36 @@ onMounted(async () => {
   gap: 0.5rem;
 }
 
+.selection-summary {
+  background: linear-gradient(135deg, #f8f1e4 0%, #eefcf7 100%);
+  border: 1px solid #d9cab6;
+  border-radius: var(--radius-md);
+  padding: 0.65rem 0.75rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.selection-summary p {
+  margin: 0;
+  color: #584638;
+  font-size: 0.84rem;
+}
+
 .control-field {
   display: grid;
   gap: 0.35rem;
 }
 
 .prompt-label {
-  font-weight: 600;
-  color: #203a67;
+  font-weight: 700;
+  color: #3a2b1f;
 }
 
 .check-item {
   display: flex;
   align-items: center;
   gap: 0.45rem;
-  color: #1f3f73;
+  color: #3f2f24;
   font-size: 0.9rem;
 }
 
@@ -585,11 +660,12 @@ textarea,
 input,
 select {
   width: 100%;
-  border: 1px solid #b9c9e3;
+  border: 1px solid #cab8a4;
   border-radius: 10px;
   padding: 0.65rem 0.75rem;
   font: inherit;
-  background: #ffffff;
+  color: #2b2018;
+  background: #fffdf8;
 }
 
 textarea {
@@ -600,40 +676,40 @@ textarea {
 textarea:focus,
 input:focus,
 select:focus {
-  outline: 2px solid #6aa6ff;
+  outline: 2px solid rgba(6, 122, 101, 0.4);
   outline-offset: 1px;
 }
 
 button {
   justify-self: start;
-  background: #0e4cb3;
-  color: #ffffff;
+  background: linear-gradient(130deg, #0b7f68 0%, #055145 100%);
+  color: #f4fff9;
   border: 0;
-  border-radius: 10px;
-  padding: 0.6rem 1rem;
-  font-weight: 600;
+  border-radius: 11px;
+  padding: 0.62rem 1.05rem;
+  font-weight: 700;
   cursor: pointer;
 }
 
 button:disabled {
-  background: #7894c0;
+  background: #9f9a90;
   cursor: not-allowed;
 }
 
 button.secondary {
-  background: #eaf1ff;
-  border: 1px solid #b9c9e3;
-  color: #194790;
+  background: #fff5e8;
+  border: 1px solid #d8c5ae;
+  color: #5e4738;
 }
 
 button.secondary:disabled {
-  background: #f2f5fb;
-  color: #7f92b4;
+  background: #f1ebe2;
+  color: #988b7d;
 }
 
 .field-hint {
   margin: 0;
-  color: #5f7498;
+  color: #746253;
   font-size: 0.82rem;
 }
 
@@ -657,9 +733,9 @@ button.secondary:disabled {
 }
 
 .info {
-  background: #eaf4ff;
-  color: #1e4f8f;
-  border: 1px solid #c3ddff;
+  background: #e6fbf5;
+  color: #0f5f50;
+  border: 1px solid #b8e5d9;
 }
 
 .results-header {
@@ -669,13 +745,14 @@ button.secondary:disabled {
   margin-bottom: 0.8rem;
 }
 
-h2 {
-  font-size: 1.2rem;
-  color: #11284f;
+.results-header h2 {
+  margin: 0;
+  font-family: 'Fraunces', Georgia, serif;
+  color: #2a1e17;
 }
 
 .empty-state {
-  color: #5b6f93;
+  color: #5f4d3e;
 }
 
 .image-grid {
@@ -685,10 +762,10 @@ h2 {
 }
 
 .image-card {
-  border: 1px solid #dbe3ef;
-  border-radius: 10px;
+  border: 1px solid #d7c6b1;
+  border-radius: var(--radius-md);
   overflow: hidden;
-  background: #f4f8ff;
+  background: #fff9ee;
 }
 
 .image-card img {
@@ -704,12 +781,12 @@ h2 {
 
 .image-meta {
   padding: 0.65rem 0.75rem 0.75rem;
-  background: #ffffff;
+  background: #fff;
 }
 
 .image-prompt {
   margin: 0;
-  color: #163869;
+  color: #3b2d21;
   font-size: 0.9rem;
   line-height: 1.35;
   overflow-wrap: anywhere;
@@ -721,7 +798,7 @@ h2 {
 
 .image-details {
   margin: 0.45rem 0 0;
-  color: #58719b;
+  color: #6f594a;
   font-size: 0.8rem;
 }
 
