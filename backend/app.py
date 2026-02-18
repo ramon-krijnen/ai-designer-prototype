@@ -50,7 +50,7 @@ def _parse_payload(payload: dict[str, Any]) -> tuple[str, tuple[InputImage, ...]
                 "use_reference_images": (
                     bool(reference_images)
                     and bool(selection.get("use_reference_images", True))
-                    and _provider_supports_image_edit(provider_name)
+                    and _selection_supports_image_edit(provider_name, selection.get("model"))
                 ),
             }
         )
@@ -450,6 +450,28 @@ def _provider_supports_image_edit(provider_name: str) -> bool:
     options = getattr(provider_cls, "OPTIONS", None)
     if not isinstance(options, dict):
         return False
+    return bool(options.get("supports_image_edit"))
+
+
+def _selection_supports_image_edit(provider_name: str, model_name: str | None) -> bool:
+    provider_cls = provider_registry.names().get(provider_name)
+    if provider_cls is None:
+        return False
+    options = getattr(provider_cls, "OPTIONS", None)
+    if not isinstance(options, dict):
+        return False
+
+    models = options.get("models")
+    if isinstance(models, list) and model_name:
+        normalized_model_name = str(model_name).strip()
+        for model_entry in models:
+            if not isinstance(model_entry, dict):
+                continue
+            entry_id = str(model_entry.get("id") or "").strip()
+            if entry_id and entry_id == normalized_model_name:
+                if "supports_image_edit" in model_entry:
+                    return bool(model_entry.get("supports_image_edit"))
+                break
     return bool(options.get("supports_image_edit"))
 
 

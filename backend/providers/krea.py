@@ -4,20 +4,21 @@ import base64
 import json
 import os
 import time
+from uuid import uuid4
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from providers.base import ImageGenerationRequest, ImageGenerationResult
+from providers.base import ImageGenerationRequest, ImageGenerationResult, InputImage
 
 
 class KreaImageProvider:
     name = "krea"
     OPTIONS = {
         "models": [
-            {"id": "qwen_2512", "label": "qwen_2512 (Qwen 2512)"},
-            {"id": "z_image", "label": "z_image (Z Image)"},
-            {"id": "flux_1_dev", "label": "flux_1_dev (Flux 1 Dev)"},
+            {"id": "qwen_2512", "label": "qwen_2512 (Qwen 2512)", "supports_image_edit": False},
+            {"id": "z_image", "label": "z_image (Z Image)", "supports_image_edit": True},
+            {"id": "flux_1_dev", "label": "flux_1_dev (Flux 1 Dev)", "supports_image_edit": False},
         ],
         "sizes": ["1024x1024", "1024x576", "576x1024", "1536x1024", "1024x1536"],
         "qualities": [],
@@ -26,7 +27,7 @@ class KreaImageProvider:
         "default_quality": None,
         "supports_steps": True,
         "default_steps": 28,
-        "supports_image_edit": False,
+        "supports_image_edit": True,
     }
 
     _MODEL_PATH_ALIASES = {
@@ -60,6 +61,8 @@ class KreaImageProvider:
             body["width"] = width
             body["height"] = height
             size_label = f"{width}x{height}"
+            if request.reference_images:
+                body["imageUrl"] = self._upload_asset(request.reference_images[0])
 
         if model_path == "bfl/flux-1-dev":
             width, height = self._resolve_dimensions(request.size)
@@ -167,6 +170,54 @@ class KreaImageProvider:
             raise RuntimeError("Krea API returned an unexpected payload")
 
         return payload
+
+    def _upload_asset(self, image: InputImage) -> str:
+        boundary = f"----krea-{uuid4().hex}"
+        safe_filename = (image.filename or "reference-image").replace('"', "_")
+
+        body_chunks = [
+            f"--{boundary}\r\n".encode("utf-8"),
+            (
+                f'Content-Disposition: form-data; name="file"; filename="{safe_filename}"\r\n'
+                f"Content-Type: {image.mime_type or 'application/octet-stream'}\r\n\r\n"
+            ).encode("utf-8"),
+            image.data,
+            b"\r\n",
+            f"--{boundary}--\r\n".encode("utf-8"),
+        ]
+        body = b"".join(body_chunks)
+
+        request = Request(
+            f"{self._base_url}/assets",
+            data=body,
+            method="POST",
+            headers={
+                **self._base_headers(content_type_json=False),
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+        )
+
+        try:
+            with urlopen(request, timeout=60) as response:
+                response_body = response.read().decode("utf-8")
+        except HTTPError as exc:
+            details = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Krea asset upload error ({exc.code}): {details}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"Krea asset upload connection failed: {exc.reason}") from exc
+
+        try:
+            payload = json.loads(response_body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Krea asset upload returned invalid JSON") from exc
+
+        if not isinstance(payload, dict):
+            raise RuntimeError("Krea asset upload returned an unexpected payload")
+
+        image_url = payload.get("imageUrl") or payload.get("image_url") or payload.get("url")
+        if not isinstance(image_url, str) or not image_url.strip():
+            raise RuntimeError("Krea asset upload did not return an image URL")
+        return image_url.strip()
 
     def _get_json(self, url: str) -> dict[str, object]:
         request = Request(

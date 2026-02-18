@@ -44,6 +44,10 @@ const modelCatalog = computed(() => {
         typeof modelItem === 'object' && typeof modelItem?.label === 'string' && modelItem.label.trim()
           ? modelItem.label.trim()
           : modelId
+      const modelSupportsImageEdit =
+        typeof modelItem === 'object' && typeof modelItem?.supports_image_edit === 'boolean'
+          ? Boolean(modelItem.supports_image_edit)
+          : Boolean(providerConfig.supports_image_edit)
 
       const key = buildModelKey(providerName, modelId)
       items.push({
@@ -54,7 +58,7 @@ const modelCatalog = computed(() => {
         sizes: normalizeStringOptions(providerConfig.sizes),
         qualities: normalizeStringOptions(providerConfig.qualities),
         supportsSteps: Boolean(providerConfig.supports_steps),
-        supportsImageEdit: Boolean(providerConfig.supports_image_edit),
+        supportsImageEdit: modelSupportsImageEdit,
         defaultSize: normalizeOptionalString(providerConfig.default_size),
         defaultQuality: normalizeOptionalString(providerConfig.default_quality),
         defaultSteps: Number.isFinite(providerConfig.default_steps) ? Number(providerConfig.default_steps) : 28,
