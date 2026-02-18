@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import ArchiveView from './components/views/ArchiveView.vue'
 import GenerationView from './components/views/GenerationView.vue'
 import LightboxModal from './components/LightboxModal.vue'
@@ -8,6 +8,12 @@ const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').trim()
 
 const activeTab = ref('generate')
 const lightboxImage = ref(null)
+
+const activeDescription = computed(() =>
+  activeTab.value === 'generate'
+    ? 'Compose runs across providers, then tune each model before launch.'
+    : 'Inspect historical runs, compare prompts, and revisit references.',
+)
 
 function openLightbox(image) {
   if (!image?.src) return
@@ -21,9 +27,10 @@ function closeLightbox() {
 
 <template>
   <main class="app-shell">
-    <section class="panel">
-      <h1>Flexible AI Research Tool</h1>
-      <p class="subtitle">Generate images, then browse complete run history in Archive.</p>
+    <section class="hero">
+      <p class="kicker">AI Design Studio</p>
+      <h1>Run Multiple Image Models Like A Lab Session</h1>
+      <p class="subtitle">{{ activeDescription }}</p>
 
       <div class="tabs" role="tablist" aria-label="Image tools">
         <button
@@ -58,50 +65,67 @@ function closeLightbox() {
 
 <style scoped>
 .app-shell {
-  max-width: 1100px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 2rem 1rem 3rem;
+  padding: 1.5rem 1rem 3rem;
   display: grid;
   gap: 1.25rem;
 }
 
-.panel {
-  background: #ffffff;
-  border: 1px solid #dbe3ef;
-  border-radius: 12px;
-  padding: 1rem;
+.hero {
+  background: linear-gradient(140deg, rgba(255, 249, 239, 0.94) 0%, rgba(250, 240, 225, 0.98) 62%, rgba(232, 251, 245, 0.96) 100%);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft);
+  padding: 1.1rem 1.1rem 1.3rem;
+}
+
+.kicker {
+  margin: 0;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  color: var(--accent-strong);
+  font-weight: 700;
 }
 
 h1 {
-  font-size: 1.5rem;
-  margin-bottom: 0.2rem;
-  color: #11284f;
+  font-family: 'Fraunces', Georgia, serif;
+  font-size: clamp(1.5rem, 4vw, 2.2rem);
+  line-height: 1.12;
+  margin: 0.35rem 0 0.35rem;
+  color: #2a1f18;
+  max-width: 16ch;
 }
 
 .subtitle {
-  color: #4b5f85;
-  margin-bottom: 1rem;
+  color: var(--ink-soft);
+  margin: 0 0 1rem;
+  max-width: 60ch;
 }
 
 .tabs {
-  display: flex;
-  gap: 0.55rem;
+  display: inline-flex;
+  gap: 0.4rem;
+  background: rgba(255, 252, 247, 0.9);
+  border: 1px solid #ddcbb5;
+  border-radius: 999px;
+  padding: 0.28rem;
 }
 
 .tab-btn {
-  background: #eff5ff;
-  border: 1px solid #b9c9e3;
-  color: #20457d;
+  background: transparent;
+  border: 0;
+  color: #5f4a3e;
   border-radius: 999px;
-  padding: 0.4rem 0.9rem;
-  font-weight: 600;
+  padding: 0.42rem 0.95rem;
+  font-weight: 700;
   cursor: pointer;
 }
 
 .tab-btn.active {
-  background: #0e4cb3;
-  border-color: #0e4cb3;
-  color: #ffffff;
+  background: linear-gradient(130deg, #0b7f68 0%, #056253 100%);
+  color: #f7fff9;
 }
 
 @media (min-width: 860px) {
@@ -109,8 +133,8 @@ h1 {
     padding: 2rem 1.25rem 3rem;
   }
 
-  .panel {
-    padding: 1.25rem;
+  .hero {
+    padding: 1.35rem 1.35rem 1.5rem;
   }
 }
 </style>
