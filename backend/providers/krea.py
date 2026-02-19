@@ -19,6 +19,7 @@ class KreaImageProvider:
             {"id": "qwen_2512", "label": "qwen_2512 (Qwen 2512)", "supports_image_edit": False},
             {"id": "z_image", "label": "z_image (Z Image)", "supports_image_edit": True},
             {"id": "flux_1_dev", "label": "flux_1_dev (Flux 1 Dev)", "supports_image_edit": False},
+            {"id": "flux_kontext_dev", "label": "flux_kontext_dev (Flux Kontext Dev)", "supports_image_edit": True},
         ],
         "sizes": ["1024x1024", "1024x576", "576x1024", "1536x1024", "1024x1536"],
         "qualities": [],
@@ -37,6 +38,9 @@ class KreaImageProvider:
         "z-image/z-image": "z-image/z-image",
         "flux_1_dev": "bfl/flux-1-dev",
         "bfl/flux-1-dev": "bfl/flux-1-dev",
+        "flux_kontext_dev": "bfl/flux-1-kontext-dev",
+        "flux-1-kontext-dev": "bfl/flux-1-kontext-dev",
+        "bfl/flux-1-kontext-dev": "bfl/flux-1-kontext-dev",
     }
 
     def __init__(self) -> None:
@@ -64,12 +68,14 @@ class KreaImageProvider:
             if request.reference_images:
                 body["imageUrl"] = self._upload_asset(request.reference_images[0])
 
-        if model_path == "bfl/flux-1-dev":
+        if model_path in {"bfl/flux-1-dev", "bfl/flux-1-kontext-dev"}:
             width, height = self._resolve_dimensions(request.size)
             body["width"] = width
             body["height"] = height
             size_label = f"{width}x{height}"
             body["steps"] = self._resolve_flux_steps(request.steps)
+            if model_path == "bfl/flux-1-kontext-dev" and request.reference_images:
+                body["imageUrl"] = self._upload_asset(request.reference_images[0])
 
         endpoint = f"{self._base_url}/generate/image/{model_path}"
         payload = self._resolve_generation_payload(endpoint, body)
