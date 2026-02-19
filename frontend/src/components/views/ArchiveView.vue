@@ -28,6 +28,7 @@ const filteredRuns = computed(() => {
 
   return archiveRuns.value.filter((run) => {
     if (run.runId?.toLowerCase().includes(query)) return true
+    if (run.presetId?.toLowerCase().includes(query)) return true
     if (run.modelTargets?.some((target) => targetLabel(target).toLowerCase().includes(query))) return true
     if (run.images?.some((image) => (image.prompt || '').toLowerCase().includes(query))) return true
     return false
@@ -127,6 +128,9 @@ onMounted(() => {
                 .join(', ')
             }}
             <span v-if="run.modelTargets.length > MAX_TARGET_LABELS"> +{{ run.modelTargets.length - MAX_TARGET_LABELS }} more</span>
+          </p>
+          <p v-if="run.presetId" class="run-targets">
+            Preset: {{ run.presetId }}<span v-if="run.presetVersion"> · v{{ run.presetVersion }}</span>
           </p>
 
           <div v-if="run.referenceImages?.length" class="reference-block">

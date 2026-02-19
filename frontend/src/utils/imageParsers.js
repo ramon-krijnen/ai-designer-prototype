@@ -160,6 +160,8 @@ export function parseRunRecord(run, index, apiBaseUrl = '') {
     runId,
     createdAt,
     imageCount: typeof run.image_count === 'number' ? run.image_count : images.length,
+    presetId: pickStringField(run.preset_id),
+    presetVersion: Number.isFinite(run.preset_version) ? Number(run.preset_version) : 0,
     modelTargets,
     referenceImages,
     images,

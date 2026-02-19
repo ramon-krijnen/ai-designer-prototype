@@ -1,11 +1,15 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { dedupeImages, extractImages } from '../../utils/imageParsers'
 
 const props = defineProps({
   apiBaseUrl: {
     type: String,
     default: '',
+  },
+  presetSelection: {
+    type: Object,
+    default: null,
   },
 })
 
@@ -21,6 +25,10 @@ const providerOptions = ref({})
 const selectedModelKeys = ref([])
 const selectionSettings = ref({})
 const editImages = ref([])
+
+const presets = ref([])
+const selectedPresetId = ref('')
+const presetVariables = ref({})
 
 const MAX_EDIT_IMAGES = 16
 const POLL_INTERVAL_MS = 700
@@ -84,6 +92,15 @@ const selectedUsingReferenceCount = computed(() =>
 )
 
 const promptCharCount = computed(() => prompt.value.trim().length)
+
+const selectedPreset = computed(() => presets.value.find((preset) => preset.id === selectedPresetId.value) || null)
+const selectedPresetVersion = computed(() => selectedPreset.value?.version || null)
+const presetVariablesSchema = computed(() => {
+  const variables = selectedPresetVersion.value?.inputSchema?.variables
+  return Array.isArray(variables) ? variables : []
+})
+const presetReferenceRules = computed(() => selectedPresetVersion.value?.referenceRules || {})
+const isPresetMode = computed(() => Boolean(selectedPresetId.value && selectedPresetVersion.value))
 
 function buildModelKey(providerName, modelId) {
   return `${providerName}::${modelId}`
@@ -156,6 +173,129 @@ function normalizeStepValue(rawValue) {
   return parsed
 }
 
+function parsePresetModelConfig() {
+  const modelConfig = selectedPresetVersion.value?.modelConfig || {}
+  let provider = typeof modelConfig.provider === 'string' ? modelConfig.provider.trim() : ''
+  let modelId =
+    typeof modelConfig.modelId === 'string' ? modelConfig.modelId.trim() : typeof modelConfig.model === 'string' ? modelConfig.model.trim() : ''
+
+  if ((!provider || !modelId) && modelId.includes('::')) {
+    const [providerPart, modelPart] = modelId.split('::', 2)
+    provider = provider || providerPart.trim()
+    modelId = modelPart.trim()
+  }
+
+  if (!provider || !modelId) {
+    throw new Error('Preset model configuration is missing provider/modelId.')
+  }
+  return { provider: provider.toLowerCase(), modelId }
+}
+
+function applySelectedPresetToSelections() {
+  if (!isPresetMode.value) return
+  const { provider, modelId } = parsePresetModelConfig()
+  const key = buildModelKey(provider, modelId)
+  const model = modelCatalog.value.find((item) => item.key === key)
+  if (!model) {
+    throw new Error(`Preset model '${provider}::${modelId}' is not available in provider catalog.`)
+  }
+
+  const baseSettings = getDefaultSettings(model)
+  const generationParams = selectedPresetVersion.value?.generationParams || {}
+  const mode = typeof presetReferenceRules.value.referenceMode === 'string' ? presetReferenceRules.value.referenceMode : 'none'
+
+  selectionSettings.value[key] = {
+    ...baseSettings,
+    size: typeof generationParams.size === 'string' ? generationParams.size : baseSettings.size,
+    quality: typeof generationParams.quality === 'string' ? generationParams.quality : baseSettings.quality,
+    steps: generationParams.steps ? String(generationParams.steps) : baseSettings.steps,
+    useReferenceImages: model.supportsImageEdit && mode !== 'none',
+  }
+  selectedModelKeys.value = [key]
+}
+
+function initializePresetVariables() {
+  const next = {}
+  presetVariablesSchema.value.forEach((variable) => {
+    const name = typeof variable?.name === 'string' ? variable.name.trim() : ''
+    if (!name) return
+    const defaultValue = variable.default
+    next[name] = defaultValue == null ? '' : String(defaultValue)
+  })
+  presetVariables.value = next
+}
+
+function renderPresetPromptOrThrow() {
+  const promptingConfig = selectedPresetVersion.value?.promptingConfig || {}
+  const promptTemplate = typeof promptingConfig.promptTemplate === 'string' ? promptingConfig.promptTemplate.trim() : ''
+  if (!promptTemplate) throw new Error('Preset prompt template is empty.')
+
+  let rendered = promptTemplate
+  const tokenRegex = /\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g
+  const requiredTokens = new Set()
+
+  for (const match of promptTemplate.matchAll(tokenRegex)) {
+    requiredTokens.add(match[1])
+  }
+
+  presetVariablesSchema.value.forEach((variable) => {
+    const name = typeof variable?.name === 'string' ? variable.name.trim() : ''
+    if (!name) return
+    const valueRaw = presetVariables.value[name]
+    const value = typeof valueRaw === 'string' ? valueRaw.trim() : String(valueRaw ?? '').trim()
+    const required = Boolean(variable.required)
+    const allowedValues = Array.isArray(variable.allowedValues)
+      ? variable.allowedValues.map((item) => String(item).trim()).filter(Boolean)
+      : []
+
+    if (!value) {
+      if (required || requiredTokens.has(name)) {
+        throw new Error(`Preset variable '${name}' is required.`)
+      }
+      return
+    }
+
+    if (allowedValues.length && !allowedValues.includes(value)) {
+      throw new Error(`Preset variable '${name}' must be one of: ${allowedValues.join(', ')}`)
+    }
+
+    const expression = new RegExp(`\\{\\{\\s*${name}\\s*\\}\\}`, 'g')
+    rendered = rendered.replace(expression, value)
+    requiredTokens.delete(name)
+  })
+
+  if (requiredTokens.size) {
+    const missing = Array.from(requiredTokens).join(', ')
+    throw new Error(`Missing preset variables: ${missing}`)
+  }
+
+  const parts = []
+  if (typeof promptingConfig.systemPrompt === 'string' && promptingConfig.systemPrompt.trim()) {
+    parts.push(`System: ${promptingConfig.systemPrompt.trim()}`)
+  }
+  parts.push(rendered.trim())
+  if (typeof promptingConfig.negativePrompt === 'string' && promptingConfig.negativePrompt.trim()) {
+    parts.push(`Avoid: ${promptingConfig.negativePrompt.trim()}`)
+  }
+  return parts.join('\n\n')
+}
+
+function validatePresetReferences() {
+  if (!isPresetMode.value) return
+  const mode = typeof presetReferenceRules.value.referenceMode === 'string' ? presetReferenceRules.value.referenceMode : 'none'
+  const maxReferenceImages = Number.parseInt(String(presetReferenceRules.value.maxReferenceImages || 0), 10)
+
+  if (mode === 'none' && editImages.value.length > 0) {
+    throw new Error('This preset does not allow reference images.')
+  }
+  if (mode === 'required' && editImages.value.length === 0) {
+    throw new Error('This preset requires at least one reference image.')
+  }
+  if (Number.isFinite(maxReferenceImages) && maxReferenceImages > 0 && editImages.value.length > maxReferenceImages) {
+    throw new Error(`This preset allows up to ${maxReferenceImages} reference images.`)
+  }
+}
+
 async function loadProviderOptions() {
   const response = await fetch(`${props.apiBaseUrl}/api/providers`)
   const payload = await response.json().catch(() => ({}))
@@ -169,6 +309,15 @@ async function loadProviderOptions() {
   }
 
   initializeSelections()
+}
+
+async function loadPresets() {
+  const response = await fetch(`${props.apiBaseUrl}/api/presets`)
+  const payload = await response.json().catch(() => [])
+  if (!response.ok || !Array.isArray(payload)) {
+    throw new Error('Failed to load presets.')
+  }
+  presets.value = payload
 }
 
 function buildSelectionsPayload() {
@@ -186,8 +335,7 @@ function buildSelectionsPayload() {
 }
 
 async function generateImages() {
-  const trimmedPrompt = prompt.value.trim()
-  if (!trimmedPrompt || isLoading.value) return
+  if (isLoading.value) return
 
   isLoading.value = true
   error.value = ''
@@ -195,19 +343,38 @@ async function generateImages() {
   images.value = []
 
   try {
-    if (!selectedModels.value.length) {
-      throw new Error('Select at least one model.')
+    let finalPrompt = prompt.value.trim()
+    let selections = []
+
+    if (isPresetMode.value) {
+      validatePresetReferences()
+      applySelectedPresetToSelections()
+      finalPrompt = renderPresetPromptOrThrow()
+      selections = buildSelectionsPayload()
+      if (!selections.length) {
+        throw new Error('Preset model could not be resolved to a selection.')
+      }
+    } else {
+      if (!finalPrompt) {
+        throw new Error('Prompt is required.')
+      }
+      if (!selectedModels.value.length) {
+        throw new Error('Select at least one model.')
+      }
+      selections = buildSelectionsPayload()
     }
 
-    const selections = buildSelectionsPayload()
     const response = await fetch(`${props.apiBaseUrl}/api/images/generate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        prompt: trimmedPrompt,
+        prompt: finalPrompt,
         selections,
+        preset_id: isPresetMode.value ? selectedPresetId.value : undefined,
+        preset_version: isPresetMode.value ? selectedPresetVersion.value?.version : undefined,
+        preset_variables: isPresetMode.value ? presetVariables.value : undefined,
         edit_images: editImages.value.length
           ? editImages.value.map((image) => ({
               name: image.name,
@@ -228,7 +395,7 @@ async function generateImages() {
       throw new Error('Missing run id in generate response.')
     }
 
-    const status = await pollRunStatus(runId, trimmedPrompt)
+    const status = await pollRunStatus(runId, finalPrompt)
     if (status.failed > 0) {
       error.value = `${status.failed} model request(s) failed. Showing successful images.`
     }
@@ -329,9 +496,28 @@ async function handleEditImagesChange(event) {
   }
 }
 
+function onPresetChange() {
+  if (!isPresetMode.value) return
+  initializePresetVariables()
+  applySelectedPresetToSelections()
+}
+
+watch(
+  () => props.presetSelection,
+  (value) => {
+    if (!value || typeof value !== 'object') return
+    if (typeof value.presetId === 'string' && value.presetId.trim()) {
+      selectedPresetId.value = value.presetId.trim()
+      onPresetChange()
+    }
+  },
+  { deep: true },
+)
+
 onMounted(async () => {
   try {
-    await loadProviderOptions()
+    await Promise.all([loadProviderOptions(), loadPresets()])
+    onPresetChange()
   } catch (providerError) {
     error.value = providerError instanceof Error ? providerError.message : 'Failed to load providers.'
   }
@@ -343,16 +529,53 @@ onMounted(async () => {
     <section class="panel">
       <form class="prompt-form" @submit.prevent="generateImages">
         <div class="section-label">
+          <span class="section-label-kicker">Step 0</span>
+          <h2>Preset (Optional)</h2>
+        </div>
+
+        <div class="control-field">
+          <label class="prompt-label" for="preset-select">Preset</label>
+          <select id="preset-select" v-model="selectedPresetId" :disabled="isLoading" @change="onPresetChange">
+            <option value="">Manual configuration</option>
+            <option v-for="preset in presets" :key="preset.id" :value="preset.id">
+              {{ preset.name }} (v{{ preset.latestVersion }})
+            </option>
+          </select>
+        </div>
+
+        <div v-if="isPresetMode" class="preset-box">
+          <p class="field-hint">Using preset version {{ selectedPresetVersion.version }}.</p>
+          <div v-for="variable in presetVariablesSchema" :key="variable.name" class="control-field">
+            <label class="prompt-label">{{ variable.name }}<span v-if="variable.required"> *</span></label>
+            <select
+              v-if="Array.isArray(variable.allowedValues) && variable.allowedValues.length"
+              v-model="presetVariables[variable.name]"
+              :disabled="isLoading"
+            >
+              <option v-for="option in variable.allowedValues" :key="option" :value="option">{{ option }}</option>
+            </select>
+            <input
+              v-else-if="variable.type === 'number'"
+              v-model="presetVariables[variable.name]"
+              type="number"
+              :disabled="isLoading"
+            />
+            <textarea v-else v-model="presetVariables[variable.name]" rows="2" :disabled="isLoading" />
+            <p v-if="variable.description" class="field-hint">{{ variable.description }}</p>
+          </div>
+        </div>
+
+        <div class="section-label">
           <span class="section-label-kicker">Step 1</span>
           <h2>Model Targets</h2>
         </div>
 
-        <div class="model-controls">
+        <div class="model-controls" :class="{ disabled: isPresetMode }">
           <div class="model-controls-header">
             <p class="summary-line">{{ selectedModels.length }} selected · {{ providerNames.length }} providers</p>
             <div class="action-row">
-              <button type="button" class="secondary" :disabled="isLoading" @click="selectAllModels">Select All</button>
-              <button type="button" class="secondary" :disabled="isLoading" @click="clearModelSelection">Clear</button>
+              <button type="button" class="secondary" :disabled="isLoading || isPresetMode" @click="selectAllModels">Select All</button>
+              <button type="button" class="secondary" :disabled="isLoading || isPresetMode" @click="clearModelSelection">Clear</button>
             </div>
           </div>
 
@@ -367,7 +590,7 @@ onMounted(async () => {
                 <input
                   type="checkbox"
                   :checked="selectedModelKeys.includes(item.key)"
-                  :disabled="isLoading"
+                  :disabled="isLoading || isPresetMode"
                   @change="toggleModelSelection(item.key)"
                 />
                 <div>
@@ -382,7 +605,7 @@ onMounted(async () => {
                   <select
                     :id="`size-${item.key}`"
                     v-model="selectionSettings[item.key].size"
-                    :disabled="isLoading"
+                    :disabled="isLoading || isPresetMode"
                     @focus="ensureSettings(item)"
                   >
                     <option v-for="option in item.sizes" :key="option" :value="option">{{ option }}</option>
@@ -394,7 +617,7 @@ onMounted(async () => {
                   <select
                     :id="`quality-${item.key}`"
                     v-model="selectionSettings[item.key].quality"
-                    :disabled="isLoading"
+                    :disabled="isLoading || isPresetMode"
                     @focus="ensureSettings(item)"
                   >
                     <option v-for="option in item.qualities" :key="option" :value="option">{{ option }}</option>
@@ -408,7 +631,7 @@ onMounted(async () => {
                     v-model="selectionSettings[item.key].steps"
                     type="number"
                     min="1"
-                    :disabled="isLoading"
+                    :disabled="isLoading || isPresetMode"
                     @focus="ensureSettings(item)"
                   />
                 </div>
@@ -417,7 +640,7 @@ onMounted(async () => {
                   <input
                     v-model="selectionSettings[item.key].useReferenceImages"
                     type="checkbox"
-                    :disabled="isLoading"
+                    :disabled="isLoading || isPresetMode"
                     @focus="ensureSettings(item)"
                   />
                   <span>Use reference images</span>
@@ -437,7 +660,7 @@ onMounted(async () => {
           <h2>Prompt & References</h2>
         </div>
 
-        <div class="control-field">
+        <div class="control-field" v-if="!isPresetMode">
           <label class="prompt-label" for="prompt-input">Prompt</label>
           <textarea
             id="prompt-input"
@@ -449,8 +672,12 @@ onMounted(async () => {
           <p class="field-hint">{{ promptCharCount }} characters</p>
         </div>
 
+        <div v-else class="control-field">
+          <p class="field-hint">Prompt is composed from preset template + variables.</p>
+        </div>
+
         <div class="control-field">
-          <label class="prompt-label" for="edit-images-input">Reference Images (Optional)</label>
+          <label class="prompt-label" for="edit-images-input">Reference Images</label>
           <input
             id="edit-images-input"
             type="file"
@@ -459,16 +686,14 @@ onMounted(async () => {
             :disabled="isLoading"
             @change="handleEditImagesChange"
           />
-          <p class="field-hint">
-            Attach up to {{ MAX_EDIT_IMAGES }} images. They are persisted with the run and only used for models with edit support.
-          </p>
+          <p class="field-hint">Attach up to {{ MAX_EDIT_IMAGES }} images.</p>
           <div v-if="editImageCount" class="edit-images-summary">
             <p class="field-hint">{{ editImageCount }} image{{ editImageCount === 1 ? '' : 's' }} selected</p>
             <button type="button" class="secondary" :disabled="isLoading" @click="clearEditImages">Clear</button>
           </div>
         </div>
 
-        <button type="submit" :disabled="isLoading || !prompt.trim() || !selectedModels.length">
+        <button type="submit" :disabled="isLoading || (!isPresetMode && !prompt.trim()) || !selectedModels.length">
           {{ isLoading ? 'Generating...' : 'Generate Images' }}
         </button>
       </form>
@@ -542,9 +767,20 @@ onMounted(async () => {
   color: #2c2119;
 }
 
+.preset-box {
+  border: 1px solid #d7c6b1;
+  border-radius: var(--radius-md);
+  padding: 0.65rem;
+  background: #fff8ef;
+}
+
 .model-controls {
   display: grid;
   gap: 0.75rem;
+}
+
+.model-controls.disabled {
+  opacity: 0.85;
 }
 
 .model-controls-header {

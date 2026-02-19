@@ -56,7 +56,40 @@ class ImageStore:
                 CREATE TABLE IF NOT EXISTS run_records (
                     run_id TEXT PRIMARY KEY,
                     created_at TEXT NOT NULL,
-                    request_json TEXT NOT NULL
+                    request_json TEXT NOT NULL,
+                    preset_id TEXT,
+                    preset_version INTEGER
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS presets (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    tags_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    latest_version INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS preset_versions (
+                    id TEXT PRIMARY KEY,
+                    preset_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    model_config_json TEXT NOT NULL,
+                    prompting_config_json TEXT NOT NULL,
+                    input_schema_json TEXT NOT NULL,
+                    generation_params_json TEXT NOT NULL,
+                    reference_rules_json TEXT NOT NULL,
+                    output_rules_json TEXT NOT NULL,
+                    UNIQUE(preset_id, version)
                 )
                 """
             )
@@ -90,6 +123,14 @@ class ImageStore:
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_run_records_created_at ON run_records(created_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_run_reference_images_run_id ON run_reference_images(run_id)")
+            run_columns = {row["name"] for row in conn.execute("PRAGMA table_info(run_records)").fetchall()}
+            if "preset_id" not in run_columns:
+                conn.execute("ALTER TABLE run_records ADD COLUMN preset_id TEXT")
+            if "preset_version" not in run_columns:
+                conn.execute("ALTER TABLE run_records ADD COLUMN preset_version INTEGER")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_run_records_preset_id ON run_records(preset_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_presets_updated_at ON presets(updated_at DESC)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_preset_versions_preset_id ON preset_versions(preset_id)")
             if "image_base64" not in columns:
                 conn.execute("ALTER TABLE image_generations ADD COLUMN image_base64 TEXT")
                 rows = conn.execute(
@@ -113,8 +154,8 @@ class ImageStore:
                     )
             conn.execute(
                 """
-                INSERT OR IGNORE INTO run_records (run_id, created_at, request_json)
-                SELECT run_id, MIN(created_at), COALESCE(MAX(request_json), '{}')
+                INSERT OR IGNORE INTO run_records (run_id, created_at, request_json, preset_id, preset_version)
+                SELECT run_id, MIN(created_at), COALESCE(MAX(request_json), '{}'), NULL, NULL
                 FROM image_generations
                 WHERE run_id IS NOT NULL AND run_id != ''
                 GROUP BY run_id
@@ -126,12 +167,16 @@ class ImageStore:
         run_id: str,
         request_payload: dict[str, Any],
         reference_images: tuple[InputImage, ...] = (),
+        preset_id: str | None = None,
+        preset_version: int | None = None,
     ) -> dict[str, Any]:
         created_at = datetime.now(UTC).isoformat()
         run_row = {
             "run_id": run_id,
             "created_at": created_at,
             "request_json": json.dumps(request_payload, ensure_ascii=True),
+            "preset_id": preset_id,
+            "preset_version": preset_version,
         }
 
         reference_rows = []
@@ -156,8 +201,8 @@ class ImageStore:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO run_records (run_id, created_at, request_json)
-                VALUES (:run_id, :created_at, :request_json)
+                INSERT INTO run_records (run_id, created_at, request_json, preset_id, preset_version)
+                VALUES (:run_id, :created_at, :request_json, :preset_id, :preset_version)
                 """,
                 run_row,
             )
@@ -316,7 +361,7 @@ class ImageStore:
         with self._connect() as conn:
             run_rows = conn.execute(
                 """
-                SELECT run_id, created_at, request_json
+                SELECT run_id, created_at, request_json, preset_id, preset_version
                 FROM run_records
                 ORDER BY created_at DESC
                 LIMIT ? OFFSET ?
@@ -370,6 +415,8 @@ class ImageStore:
                     "images": run_images,
                     "reference_images": references_by_run.get(run_id, []),
                     "request_json": self._load_json(row["request_json"], default={}),
+                    "preset_id": row["preset_id"],
+                    "preset_version": row["preset_version"],
                 }
             )
         return runs
@@ -378,7 +425,7 @@ class ImageStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT run_id, created_at, request_json
+                SELECT run_id, created_at, request_json, preset_id, preset_version
                 FROM run_records
                 WHERE run_id = ?
                 """,
@@ -416,6 +463,226 @@ class ImageStore:
                 (run_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def create_preset(
+        self,
+        *,
+        name: str,
+        description: str,
+        tags: list[str],
+        created_by: str,
+        model_config: dict[str, Any],
+        prompting_config: dict[str, Any],
+        input_schema: dict[str, Any],
+        generation_params: dict[str, Any],
+        reference_rules: dict[str, Any],
+        output_rules: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now = datetime.now(UTC).isoformat()
+        preset_id = str(uuid4())
+        version_id = str(uuid4())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO presets (id, name, description, tags_json, created_at, updated_at, created_by, latest_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    preset_id,
+                    name,
+                    description,
+                    json.dumps(tags, ensure_ascii=True),
+                    now,
+                    now,
+                    created_by,
+                    1,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO preset_versions (
+                    id, preset_id, version, created_at,
+                    model_config_json, prompting_config_json, input_schema_json,
+                    generation_params_json, reference_rules_json, output_rules_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    version_id,
+                    preset_id,
+                    1,
+                    now,
+                    json.dumps(model_config, ensure_ascii=True),
+                    json.dumps(prompting_config, ensure_ascii=True),
+                    json.dumps(input_schema, ensure_ascii=True),
+                    json.dumps(generation_params, ensure_ascii=True),
+                    json.dumps(reference_rules, ensure_ascii=True),
+                    json.dumps(output_rules or {}, ensure_ascii=True),
+                ),
+            )
+        preset = self.get_preset(preset_id)
+        if preset is None:
+            raise RuntimeError(f"Failed to create preset '{preset_id}'")
+        return preset
+
+    def list_presets(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, name, description, tags_json, created_at, updated_at, created_by, latest_version
+                FROM presets
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+        return [self._normalize_preset_row(dict(row)) for row in rows]
+
+    def get_preset(self, preset_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, name, description, tags_json, created_at, updated_at, created_by, latest_version
+                FROM presets
+                WHERE id = ?
+                """,
+                (preset_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._normalize_preset_row(dict(row))
+
+    def list_preset_versions(self, preset_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, preset_id, version, created_at,
+                       model_config_json, prompting_config_json, input_schema_json,
+                       generation_params_json, reference_rules_json, output_rules_json
+                FROM preset_versions
+                WHERE preset_id = ?
+                ORDER BY version DESC
+                """,
+                (preset_id,),
+            ).fetchall()
+        return [self._normalize_preset_version_row(dict(row)) for row in rows]
+
+    def get_preset_version(self, preset_id: str, version: int | None = None) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            if version is None:
+                row = conn.execute(
+                    """
+                    SELECT v.id, v.preset_id, v.version, v.created_at,
+                           v.model_config_json, v.prompting_config_json, v.input_schema_json,
+                           v.generation_params_json, v.reference_rules_json, v.output_rules_json
+                    FROM preset_versions v
+                    JOIN presets p ON p.id = v.preset_id
+                    WHERE v.preset_id = ? AND v.version = p.latest_version
+                    """,
+                    (preset_id,),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT id, preset_id, version, created_at,
+                           model_config_json, prompting_config_json, input_schema_json,
+                           generation_params_json, reference_rules_json, output_rules_json
+                    FROM preset_versions
+                    WHERE preset_id = ? AND version = ?
+                    """,
+                    (preset_id, version),
+                ).fetchone()
+        if row is None:
+            return None
+        return self._normalize_preset_version_row(dict(row))
+
+    def create_preset_version(
+        self,
+        preset_id: str,
+        *,
+        model_config: dict[str, Any],
+        prompting_config: dict[str, Any],
+        input_schema: dict[str, Any],
+        generation_params: dict[str, Any],
+        reference_rules: dict[str, Any],
+        output_rules: dict[str, Any] | None = None,
+        name: str | None = None,
+        description: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        now = datetime.now(UTC).isoformat()
+        version_id = str(uuid4())
+        with self._connect() as conn:
+            current = conn.execute(
+                "SELECT latest_version, name, description, tags_json FROM presets WHERE id = ?",
+                (preset_id,),
+            ).fetchone()
+            if current is None:
+                raise ValueError(f"Preset '{preset_id}' not found")
+            next_version = int(current["latest_version"]) + 1
+            conn.execute(
+                """
+                INSERT INTO preset_versions (
+                    id, preset_id, version, created_at,
+                    model_config_json, prompting_config_json, input_schema_json,
+                    generation_params_json, reference_rules_json, output_rules_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    version_id,
+                    preset_id,
+                    next_version,
+                    now,
+                    json.dumps(model_config, ensure_ascii=True),
+                    json.dumps(prompting_config, ensure_ascii=True),
+                    json.dumps(input_schema, ensure_ascii=True),
+                    json.dumps(generation_params, ensure_ascii=True),
+                    json.dumps(reference_rules, ensure_ascii=True),
+                    json.dumps(output_rules or {}, ensure_ascii=True),
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE presets
+                SET latest_version = ?, updated_at = ?, name = ?, description = ?, tags_json = ?
+                WHERE id = ?
+                """,
+                (
+                    next_version,
+                    now,
+                    name if name is not None else current["name"],
+                    description if description is not None else current["description"],
+                    json.dumps(tags, ensure_ascii=True) if isinstance(tags, list) else current["tags_json"],
+                    preset_id,
+                ),
+            )
+        version = self.get_preset_version(preset_id, version=next_version)
+        if version is None:
+            raise RuntimeError(f"Failed to create preset version for '{preset_id}'")
+        return version
+
+    def duplicate_preset(
+        self,
+        source_preset_id: str,
+        *,
+        name: str,
+        created_by: str,
+        description: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        source_preset = self.get_preset(source_preset_id)
+        source_version = self.get_preset_version(source_preset_id)
+        if source_preset is None or source_version is None:
+            raise ValueError("Source preset not found")
+        return self.create_preset(
+            name=name,
+            description=description if description is not None else source_preset["description"],
+            tags=tags if tags is not None else source_preset["tags"],
+            created_by=created_by,
+            model_config=source_version["model_config"],
+            prompting_config=source_version["prompting_config"],
+            input_schema=source_version["input_schema"],
+            generation_params=source_version["generation_params"],
+            reference_rules=source_version["reference_rules"],
+            output_rules=source_version["output_rules"],
+        )
 
     @staticmethod
     def _load_json(value: str | None, default: dict[str, Any]) -> dict[str, Any]:
@@ -487,3 +754,39 @@ class ImageStore:
         if guessed == ".jpe":
             return ".jpg"
         return guessed
+
+    @staticmethod
+    def _normalize_preset_row(row: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(row)
+        normalized["tags"] = ImageStore._load_json_array(normalized.get("tags_json"))
+        normalized.pop("tags_json", None)
+        return normalized
+
+    @staticmethod
+    def _normalize_preset_version_row(row: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(row)
+        normalized["model_config"] = ImageStore._load_json(normalized.get("model_config_json"), default={})
+        normalized["prompting_config"] = ImageStore._load_json(normalized.get("prompting_config_json"), default={})
+        normalized["input_schema"] = ImageStore._load_json(normalized.get("input_schema_json"), default={})
+        normalized["generation_params"] = ImageStore._load_json(normalized.get("generation_params_json"), default={})
+        normalized["reference_rules"] = ImageStore._load_json(normalized.get("reference_rules_json"), default={})
+        normalized["output_rules"] = ImageStore._load_json(normalized.get("output_rules_json"), default={})
+        normalized.pop("model_config_json", None)
+        normalized.pop("prompting_config_json", None)
+        normalized.pop("input_schema_json", None)
+        normalized.pop("generation_params_json", None)
+        normalized.pop("reference_rules_json", None)
+        normalized.pop("output_rules_json", None)
+        return normalized
+
+    @staticmethod
+    def _load_json_array(value: str | None) -> list[str]:
+        if not value:
+            return []
+        try:
+            loaded = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(loaded, list):
+            return []
+        return [str(item).strip() for item in loaded if str(item).strip()]

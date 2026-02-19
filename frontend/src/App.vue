@@ -2,18 +2,24 @@
 import { computed, ref } from 'vue'
 import ArchiveView from './components/views/ArchiveView.vue'
 import GenerationView from './components/views/GenerationView.vue'
+import PresetsView from './components/views/PresetsView.vue'
 import LightboxModal from './components/LightboxModal.vue'
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').trim()
 
 const activeTab = ref('generate')
 const lightboxImage = ref(null)
+const presetSelection = ref(null)
 
-const activeDescription = computed(() =>
-  activeTab.value === 'generate'
-    ? 'Compose runs across providers, then tune each model before launch.'
-    : 'Inspect historical runs, compare prompts, and revisit references.',
-)
+const activeDescription = computed(() => {
+  if (activeTab.value === 'generate') {
+    return 'Compose runs across providers, or apply a saved preset for reproducible output.'
+  }
+  if (activeTab.value === 'presets') {
+    return 'Build reusable generation setups with versioned prompt templates and model settings.'
+  }
+  return 'Inspect historical runs, compare prompts, and revisit references.'
+})
 
 function openLightbox(image) {
   if (!image?.src) return
@@ -23,13 +29,22 @@ function openLightbox(image) {
 function closeLightbox() {
   lightboxImage.value = null
 }
+
+function handleUsePreset(payload) {
+  if (!payload || typeof payload !== 'object') return
+  presetSelection.value = {
+    presetId: typeof payload.presetId === 'string' ? payload.presetId : '',
+    presetVersion: typeof payload.presetVersion === 'number' ? payload.presetVersion : undefined,
+  }
+  activeTab.value = 'generate'
+}
 </script>
 
 <template>
   <main class="app-shell">
     <section class="hero">
       <p class="kicker">AI Design Studio</p>
-      <h1>Run Multiple Image Models Like A Lab Session</h1>
+      <h1>Flexible<br>AI<br>Research<br>Tool</h1>
       <p class="subtitle">{{ activeDescription }}</p>
 
       <div class="tabs" role="tablist" aria-label="Image tools">
@@ -46,6 +61,16 @@ function closeLightbox() {
         <button
           type="button"
           class="tab-btn"
+          :class="{ active: activeTab === 'presets' }"
+          role="tab"
+          :aria-selected="activeTab === 'presets'"
+          @click="activeTab = 'presets'"
+        >
+          Presets
+        </button>
+        <button
+          type="button"
+          class="tab-btn"
           :class="{ active: activeTab === 'archive' }"
           role="tab"
           :aria-selected="activeTab === 'archive'"
@@ -56,7 +81,17 @@ function closeLightbox() {
       </div>
     </section>
 
-    <GenerationView v-if="activeTab === 'generate'" :api-base-url="API_BASE_URL" @open-image="openLightbox" />
+    <GenerationView
+      v-if="activeTab === 'generate'"
+      :api-base-url="API_BASE_URL"
+      :preset-selection="presetSelection"
+      @open-image="openLightbox"
+    />
+    <PresetsView
+      v-else-if="activeTab === 'presets'"
+      :api-base-url="API_BASE_URL"
+      @use-preset="handleUsePreset"
+    />
     <ArchiveView v-else :api-base-url="API_BASE_URL" @open-image="openLightbox" />
 
     <LightboxModal v-if="lightboxImage" :image="lightboxImage" @close="closeLightbox" />

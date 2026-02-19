@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
@@ -28,13 +29,12 @@ MAX_EDIT_IMAGES = 16
 MAX_EDIT_IMAGE_BYTES = 50 * 1024 * 1024
 
 
-def _parse_payload(payload: dict[str, Any]) -> tuple[str, tuple[InputImage, ...], list[dict[str, Any]]]:
-    prompt = (payload.get("prompt") or "").strip()
-    if not prompt:
-        raise ValueError("Field 'prompt' is required")
-
+def _parse_payload(
+    payload: dict[str, Any],
+) -> tuple[str, tuple[InputImage, ...], list[dict[str, Any]], str | None, int | None]:
     reference_images = _parse_reference_images(payload.get("edit_images"))
-    selections = _resolve_selections(payload)
+    prompt, preset_id, preset_version = _resolve_prompt(payload, reference_images)
+    selections = _resolve_selections(payload, preset_id=preset_id, preset_version=preset_version)
     if not selections:
         raise ValueError("Select at least one model.")
 
@@ -55,7 +55,7 @@ def _parse_payload(payload: dict[str, Any]) -> tuple[str, tuple[InputImage, ...]
             }
         )
 
-    return prompt, reference_images, normalized_selections
+    return prompt, reference_images, normalized_selections, preset_id, preset_version
 
 
 @app.get("/")
@@ -95,6 +95,8 @@ def list_runs() -> tuple[Any, int]:
                 "run_id": run["run_id"],
                 "created_at": run["created_at"],
                 "image_count": run["image_count"],
+                "preset_id": run.get("preset_id"),
+                "preset_version": run.get("preset_version"),
                 "request_json": run.get("request_json", {}),
                 "reference_images": [_serialize_reference_image(image) for image in run.get("reference_images", [])],
                 "images": [_serialize_record(image) for image in run["images"]],
@@ -133,6 +135,8 @@ def get_run_status(run_id: str) -> tuple[Any, int]:
                     "done": True,
                     "revised_prompt": "",
                     "errors": [],
+                    "preset_id": run_record.get("preset_id") if run_record else None,
+                    "preset_version": run_record.get("preset_version") if run_record else None,
                     "request_json": run_request,
                     "reference_images": serialized_reference_images,
                     "images": serialized_images,
@@ -161,6 +165,8 @@ def get_run_status(run_id: str) -> tuple[Any, int]:
                 "done": job["done"],
                 "revised_prompt": revised_prompt,
                 "errors": list(job["errors"]),
+                "preset_id": run_record.get("preset_id") if run_record else None,
+                "preset_version": run_record.get("preset_version") if run_record else None,
                 "request_json": run_request,
                 "reference_images": serialized_reference_images,
                 "images": serialized_images,
@@ -168,8 +174,87 @@ def get_run_status(run_id: str) -> tuple[Any, int]:
         ),
         HTTPStatus.OK,
     )
+@app.get("/api/presets")
+def list_presets() -> tuple[Any, int]:
+    presets = image_store.list_presets()
+    serialized = []
+    for preset in presets:
+        latest_version = image_store.get_preset_version(preset["id"])
+        serialized.append(_serialize_preset(preset, latest_version))
+    return jsonify(serialized), HTTPStatus.OK
 
 
+@app.post("/api/presets")
+def create_preset() -> tuple[Any, int]:
+    payload = request.get_json(silent=True) or {}
+    try:
+        parsed = _parse_preset_payload(payload)
+        preset = image_store.create_preset(**parsed)
+        latest_version = image_store.get_preset_version(preset["id"])
+        return jsonify(_serialize_preset(preset, latest_version)), HTTPStatus.CREATED
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
+
+
+@app.get("/api/presets/<preset_id>")
+def get_preset(preset_id: str) -> tuple[Any, int]:
+    preset = image_store.get_preset(preset_id)
+    if preset is None:
+        return jsonify({"error": "Preset not found"}), HTTPStatus.NOT_FOUND
+    latest_version = image_store.get_preset_version(preset_id)
+    versions = image_store.list_preset_versions(preset_id)
+    return jsonify(_serialize_preset(preset, latest_version, versions=versions)), HTTPStatus.OK
+
+
+@app.post("/api/presets/<preset_id>/versions")
+def create_preset_version(preset_id: str) -> tuple[Any, int]:
+    payload = request.get_json(silent=True) or {}
+    if image_store.get_preset(preset_id) is None:
+        return jsonify({"error": "Preset not found"}), HTTPStatus.NOT_FOUND
+    try:
+        parsed = _parse_preset_payload(payload, allow_partial_metadata=True)
+        version = image_store.create_preset_version(preset_id, **parsed)
+        preset = image_store.get_preset(preset_id)
+        if preset is None:
+            return jsonify({"error": "Preset not found"}), HTTPStatus.NOT_FOUND
+        versions = image_store.list_preset_versions(preset_id)
+        return jsonify(_serialize_preset(preset, version, versions=versions)), HTTPStatus.CREATED
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), HTTPStatus.BAD_REQUEST
+
+
+@app.get("/api/presets/<preset_id>/versions/<int:version>")
+def get_preset_version(preset_id: str, version: int) -> tuple[Any, int]:
+    preset = image_store.get_preset(preset_id)
+    if preset is None:
+        return jsonify({"error": "Preset not found"}), HTTPStatus.NOT_FOUND
+    preset_version = image_store.get_preset_version(preset_id, version=version)
+    if preset_version is None:
+        return jsonify({"error": "Preset version not found"}), HTTPStatus.NOT_FOUND
+    return jsonify(_serialize_preset(preset, preset_version)), HTTPStatus.OK
+
+
+@app.post("/api/presets/<preset_id>/duplicate")
+def duplicate_preset(preset_id: str) -> tuple[Any, int]:
+    payload = request.get_json(silent=True) or {}
+    name = _optional_str(payload.get("name"))
+    if not name:
+        return jsonify({"error": "Field 'name' is required"}), HTTPStatus.BAD_REQUEST
+    created_by = _optional_str(payload.get("createdBy")) or "local-user"
+    description = _optional_str(payload.get("description"))
+    tags = _parse_tags(payload.get("tags"))
+    try:
+        duplicated = image_store.duplicate_preset(
+            preset_id,
+            name=name,
+            created_by=created_by,
+            description=description,
+            tags=tags if tags else None,
+        )
+        latest_version = image_store.get_preset_version(duplicated["id"])
+        return jsonify(_serialize_preset(duplicated, latest_version)), HTTPStatus.CREATED
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), HTTPStatus.NOT_FOUND
 
 
 @app.get("/api/providers")
@@ -203,11 +288,17 @@ def get_reference_image_file(reference_id: str) -> Any:
 
 def _start_async_generation(payload: dict[str, Any]) -> tuple[Any, int]:
     try:
-        prompt, reference_images, selections = _parse_payload(payload)
+        prompt, reference_images, selections, preset_id, preset_version = _parse_payload(payload)
         request_payload = _sanitize_request_payload(payload, prompt, selections, reference_images)
         run_id = str(uuid4())
         now = _now_iso()
-        image_store.create_run(run_id, request_payload, reference_images)
+        image_store.create_run(
+            run_id,
+            request_payload,
+            reference_images,
+            preset_id=preset_id,
+            preset_version=preset_version,
+        )
         with generation_jobs_lock:
             generation_jobs[run_id] = {
                 "run_id": run_id,
@@ -233,6 +324,8 @@ def _start_async_generation(payload: dict[str, Any]) -> tuple[Any, int]:
                     "completed": 0,
                     "failed": 0,
                     "done": False,
+                    "preset_id": preset_id,
+                    "preset_version": preset_version,
                     "status_url": url_for("get_run_status", run_id=run_id),
                 }
             ),
@@ -346,7 +439,127 @@ def _generate_single_image(
     return {"revised_prompt": result.revised_prompt}
 
 
-def _resolve_selections(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _resolve_prompt(payload: dict[str, Any], reference_images: tuple[InputImage, ...]) -> tuple[str, str | None, int | None]:
+    preset_id = _optional_str(payload.get("preset_id"))
+    preset_version_raw = payload.get("preset_version")
+    preset_version = _parse_positive_int(preset_version_raw, field_name="preset_version")
+    if preset_id:
+        preset = image_store.get_preset_version(preset_id, version=preset_version)
+        if preset is None:
+            raise ValueError("Preset or preset version not found")
+        variables = _parse_preset_variables(payload.get("preset_variables"))
+        _validate_reference_mode(preset.get("reference_rules", {}), reference_images)
+        rendered = _render_preset_prompt(preset, variables)
+        return rendered, preset_id, preset["version"]
+
+    prompt = (payload.get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("Field 'prompt' is required")
+    return prompt, None, None
+
+
+def _render_preset_prompt(preset: dict[str, Any], variables: dict[str, Any]) -> str:
+    prompting = preset.get("prompting_config") or {}
+    prompt_template = _optional_str(prompting.get("promptTemplate"))
+    if not prompt_template:
+        raise ValueError("Preset is missing 'promptTemplate'")
+
+    input_schema = preset.get("input_schema") or {}
+    variable_defs = input_schema.get("variables")
+    if not isinstance(variable_defs, list):
+        variable_defs = []
+
+    resolved_values: dict[str, str] = {}
+    for entry in variable_defs:
+        if not isinstance(entry, dict):
+            continue
+        name = _optional_str(entry.get("name"))
+        if not name:
+            continue
+        required = bool(entry.get("required"))
+        default_value = entry.get("default")
+        value = variables.get(name, default_value)
+        if value is None or str(value).strip() == "":
+            if required:
+                raise ValueError(f"Preset variable '{name}' is required")
+            continue
+        string_value = str(value).strip()
+        allowed_values = entry.get("allowedValues")
+        if isinstance(allowed_values, list) and allowed_values:
+            allowed_strings = {str(item).strip() for item in allowed_values if str(item).strip()}
+            if allowed_strings and string_value not in allowed_strings:
+                raise ValueError(f"Preset variable '{name}' must be one of: {', '.join(sorted(allowed_strings))}")
+        resolved_values[name] = string_value
+
+    tokens = {token.strip() for token in re.findall(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}", prompt_template)}
+    for token in tokens:
+        if token not in resolved_values:
+            raise ValueError(f"Preset variable '{token}' is required by promptTemplate")
+
+    body = prompt_template
+    for key, value in resolved_values.items():
+        body = re.sub(r"\{\{\s*" + re.escape(key) + r"\s*\}\}", value, body)
+
+    parts: list[str] = []
+    system_prompt = _optional_str(prompting.get("systemPrompt"))
+    negative_prompt = _optional_str(prompting.get("negativePrompt"))
+    if system_prompt:
+        parts.append(f"System: {system_prompt}")
+    parts.append(body.strip())
+    if negative_prompt:
+        parts.append(f"Avoid: {negative_prompt}")
+    return "\n\n".join(part for part in parts if part)
+
+
+def _parse_preset_variables(raw_value: Any) -> dict[str, Any]:
+    if raw_value is None:
+        return {}
+    if not isinstance(raw_value, dict):
+        raise ValueError("Field 'preset_variables' must be an object")
+    return {str(key): value for key, value in raw_value.items()}
+
+
+def _validate_reference_mode(reference_rules: dict[str, Any], reference_images: tuple[InputImage, ...]) -> None:
+    mode = _optional_str(reference_rules.get("referenceMode")) or "none"
+    normalized_mode = mode.lower()
+    if normalized_mode == "none" and reference_images:
+        raise ValueError("This preset does not allow reference images")
+    if normalized_mode == "required" and not reference_images:
+        raise ValueError("This preset requires at least one reference image")
+    max_reference_images = _parse_positive_int(reference_rules.get("maxReferenceImages"), field_name="maxReferenceImages")
+    if max_reference_images is not None and len(reference_images) > max_reference_images:
+        raise ValueError(f"This preset allows up to {max_reference_images} reference images")
+
+
+def _resolve_preset_payload(preset_id: str | None, preset_version: int | None) -> dict[str, Any]:
+    if not preset_id:
+        return {}
+    preset = image_store.get_preset_version(preset_id, version=preset_version)
+    if preset is None:
+        raise ValueError("Preset or preset version not found")
+    model_config = preset.get("model_config") or {}
+    generation_params = preset.get("generation_params") or {}
+    model_id = _optional_str(model_config.get("modelId")) or _optional_str(model_config.get("model"))
+    provider = _optional_str(model_config.get("provider"))
+    if (not provider or not model_id) and model_id and "::" in model_id:
+        provider_part, model_part = model_id.split("::", 1)
+        provider = provider or provider_part.strip().lower()
+        model_id = model_part.strip()
+    return {
+        "provider": provider.lower() if provider else None,
+        "model": model_id,
+        "size": _optional_str(generation_params.get("size")),
+        "quality": _optional_str(generation_params.get("quality")),
+        "steps": _parse_positive_int(generation_params.get("steps"), field_name="generationParams.steps"),
+    }
+
+
+def _resolve_selections(
+    payload: dict[str, Any],
+    *,
+    preset_id: str | None = None,
+    preset_version: int | None = None,
+) -> list[dict[str, Any]]:
     raw_selections = payload.get("selections")
     selections: list[dict[str, Any]] = []
     if isinstance(raw_selections, list) and raw_selections:
@@ -354,11 +567,16 @@ def _resolve_selections(payload: dict[str, Any]) -> list[dict[str, Any]]:
             selections.append(_parse_selection(raw_selection, index))
         return selections
 
-    provider = str(payload.get("provider") or "openai").strip().lower()
-    size = _optional_str(payload.get("size"))
-    quality = _optional_str(payload.get("quality"))
+    preset_payload = _resolve_preset_payload(preset_id, preset_version)
+    provider = str(payload.get("provider") or preset_payload.get("provider") or "openai").strip().lower()
+    size = _optional_str(payload.get("size")) or preset_payload.get("size")
+    quality = _optional_str(payload.get("quality")) or preset_payload.get("quality")
     steps = _parse_steps(payload.get("steps"), field_name="steps")
-    model = _optional_str(payload.get("model"))
+    if steps is None:
+        preset_steps = preset_payload.get("steps")
+        if isinstance(preset_steps, int) and preset_steps > 0:
+            steps = preset_steps
+    model = _optional_str(payload.get("model")) or preset_payload.get("model")
     models = _parse_model_list(payload.get("models"))
     resolved_models = [model] if model else (models or [None])
     for model_name in resolved_models:
@@ -423,6 +641,21 @@ def _parse_steps(raw_value: Any, *, field_name: str) -> int | None:
     if steps <= 0:
         raise ValueError(f"Field '{field_name}' must be greater than 0")
     return steps
+
+
+def _parse_positive_int(raw_value: Any, *, field_name: str) -> int | None:
+    if raw_value is None:
+        return None
+    raw_text = str(raw_value).strip()
+    if not raw_text:
+        return None
+    try:
+        parsed = int(raw_text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Field '{field_name}' must be an integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"Field '{field_name}' must be greater than 0")
+    return parsed
 
 
 def _optional_bool(raw_value: Any, *, default: bool) -> bool:
@@ -580,6 +813,109 @@ def _normalize_mime_type(value: Any) -> str | None:
     return trimmed
 
 
+def _parse_tags(raw_value: Any) -> list[str]:
+    if raw_value is None:
+        return []
+    if isinstance(raw_value, str):
+        return [item.strip() for item in raw_value.split(",") if item.strip()]
+    if not isinstance(raw_value, list):
+        raise ValueError("Field 'tags' must be an array of strings")
+    return [str(item).strip() for item in raw_value if str(item).strip()]
+
+
+def _parse_preset_payload(payload: dict[str, Any], allow_partial_metadata: bool = False) -> dict[str, Any]:
+    name = _optional_str(payload.get("name"))
+    description_raw = payload.get("description")
+    description = _optional_str(description_raw)
+    created_by = _optional_str(payload.get("createdBy")) or "local-user"
+    tags = _parse_tags(payload.get("tags")) if ("tags" in payload) else None
+
+    model_config = payload.get("modelConfig")
+    prompting_config = payload.get("promptingConfig")
+    input_schema = payload.get("inputSchema")
+    generation_params = payload.get("generationParams")
+    reference_rules = payload.get("referenceRules")
+    output_rules = payload.get("outputRules") or {}
+
+    if not isinstance(model_config, dict):
+        raise ValueError("Field 'modelConfig' is required")
+    if not isinstance(prompting_config, dict):
+        raise ValueError("Field 'promptingConfig' is required")
+    if not isinstance(input_schema, dict):
+        raise ValueError("Field 'inputSchema' is required")
+    if not isinstance(generation_params, dict):
+        raise ValueError("Field 'generationParams' is required")
+    if not isinstance(reference_rules, dict):
+        raise ValueError("Field 'referenceRules' is required")
+    if not isinstance(output_rules, dict):
+        raise ValueError("Field 'outputRules' must be an object")
+
+    model_id = _optional_str(model_config.get("modelId")) or _optional_str(model_config.get("model"))
+    provider = _optional_str(model_config.get("provider"))
+    if not model_id:
+        raise ValueError("Field 'modelConfig.modelId' is required")
+    if not provider and "::" not in model_id:
+        raise ValueError("Field 'modelConfig.provider' is required unless modelId is 'provider::model'")
+
+    prompt_template = _optional_str(prompting_config.get("promptTemplate"))
+    if not prompt_template:
+        raise ValueError("Field 'promptingConfig.promptTemplate' is required")
+
+    variables = input_schema.get("variables")
+    if variables is None:
+        input_schema["variables"] = []
+    elif not isinstance(variables, list):
+        raise ValueError("Field 'inputSchema.variables' must be an array")
+    else:
+        normalized_variables = []
+        for index, raw_entry in enumerate(variables):
+            if not isinstance(raw_entry, dict):
+                raise ValueError(f"Field 'inputSchema.variables[{index}]' must be an object")
+            variable_name = _optional_str(raw_entry.get("name"))
+            if not variable_name:
+                raise ValueError(f"Field 'inputSchema.variables[{index}].name' is required")
+            normalized_variables.append(
+                {
+                    "name": variable_name,
+                    "type": _optional_str(raw_entry.get("type")) or "string",
+                    "required": bool(raw_entry.get("required")),
+                    "default": raw_entry.get("default"),
+                    "allowedValues": raw_entry.get("allowedValues") if isinstance(raw_entry.get("allowedValues"), list) else [],
+                    "description": _optional_str(raw_entry.get("description")) or "",
+                }
+            )
+        input_schema["variables"] = normalized_variables
+
+    mode = (_optional_str(reference_rules.get("referenceMode")) or "none").lower()
+    if mode not in {"none", "optional", "required"}:
+        raise ValueError("Field 'referenceRules.referenceMode' must be one of: none, optional, required")
+    max_reference_images = _parse_positive_int(reference_rules.get("maxReferenceImages"), field_name="maxReferenceImages")
+    reference_rules["referenceMode"] = mode
+    reference_rules["maxReferenceImages"] = max_reference_images if max_reference_images is not None else 0
+    reference_rules["referencePurpose"] = _optional_str(reference_rules.get("referencePurpose")) or "style"
+
+    parsed: dict[str, Any] = {
+        "model_config": model_config,
+        "prompting_config": prompting_config,
+        "input_schema": input_schema,
+        "generation_params": generation_params,
+        "reference_rules": reference_rules,
+        "output_rules": output_rules,
+    }
+    if allow_partial_metadata:
+        parsed["name"] = name
+        parsed["description"] = description
+        parsed["tags"] = tags
+    else:
+        if not name:
+            raise ValueError("Field 'name' is required")
+        parsed["name"] = name
+        parsed["description"] = description or ""
+        parsed["tags"] = tags or []
+        parsed["created_by"] = created_by
+    return parsed
+
+
 def _sanitize_request_payload(
     payload: dict[str, Any],
     prompt: str,
@@ -623,6 +959,52 @@ def _serialize_reference_image(record: dict[str, Any]) -> dict[str, Any]:
     reference_id = serialized["id"]
     serialized["image_url"] = url_for("get_reference_image_file", reference_id=reference_id)
     return serialized
+
+
+def _serialize_preset(
+    preset: dict[str, Any],
+    latest_version: dict[str, Any] | None,
+    *,
+    versions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "id": preset["id"],
+        "name": preset["name"],
+        "description": preset["description"],
+        "tags": preset.get("tags", []),
+        "createdAt": preset.get("created_at"),
+        "updatedAt": preset.get("updated_at"),
+        "createdBy": preset.get("created_by"),
+        "latestVersion": preset.get("latest_version"),
+    }
+    if latest_version is not None:
+        payload["version"] = {
+            "id": latest_version["id"],
+            "version": latest_version["version"],
+            "createdAt": latest_version["created_at"],
+            "modelConfig": latest_version.get("model_config", {}),
+            "promptingConfig": latest_version.get("prompting_config", {}),
+            "inputSchema": latest_version.get("input_schema", {}),
+            "generationParams": latest_version.get("generation_params", {}),
+            "referenceRules": latest_version.get("reference_rules", {}),
+            "outputRules": latest_version.get("output_rules", {}),
+        }
+    if versions is not None:
+        payload["versions"] = [
+            {
+                "id": version["id"],
+                "version": version["version"],
+                "createdAt": version["created_at"],
+                "modelConfig": version.get("model_config", {}),
+                "promptingConfig": version.get("prompting_config", {}),
+                "inputSchema": version.get("input_schema", {}),
+                "generationParams": version.get("generation_params", {}),
+                "referenceRules": version.get("reference_rules", {}),
+                "outputRules": version.get("output_rules", {}),
+            }
+            for version in versions
+        ]
+    return payload
 
 
 def _infer_total_from_request(request_payload: dict[str, Any]) -> int:
