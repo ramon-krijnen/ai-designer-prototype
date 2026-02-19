@@ -99,8 +99,8 @@ const presetVariablesSchema = computed(() => {
   const variables = selectedPresetVersion.value?.inputSchema?.variables
   return Array.isArray(variables) ? variables : []
 })
-const presetReferenceRules = computed(() => selectedPresetVersion.value?.referenceRules || {})
 const isPresetMode = computed(() => Boolean(selectedPresetId.value && selectedPresetVersion.value))
+const selectedPresetI2iOnly = computed(() => Boolean(selectedPresetVersion.value?.i2iOnly))
 
 function buildModelKey(providerName, modelId) {
   return `${providerName}::${modelId}`
@@ -145,8 +145,9 @@ function initializeSelections() {
 }
 
 function selectAllModels() {
-  selectedModelKeys.value = modelCatalog.value.map((item) => item.key)
-  modelCatalog.value.forEach((item) => ensureSettings(item))
+  const eligibleModels = selectedPresetI2iOnly.value ? modelCatalog.value.filter((item) => item.supportsImageEdit) : modelCatalog.value
+  selectedModelKeys.value = eligibleModels.map((item) => item.key)
+  eligibleModels.forEach((item) => ensureSettings(item))
 }
 
 function clearModelSelection() {
@@ -173,45 +174,8 @@ function normalizeStepValue(rawValue) {
   return parsed
 }
 
-function parsePresetModelConfig() {
-  const modelConfig = selectedPresetVersion.value?.modelConfig || {}
-  let provider = typeof modelConfig.provider === 'string' ? modelConfig.provider.trim() : ''
-  let modelId =
-    typeof modelConfig.modelId === 'string' ? modelConfig.modelId.trim() : typeof modelConfig.model === 'string' ? modelConfig.model.trim() : ''
-
-  if ((!provider || !modelId) && modelId.includes('::')) {
-    const [providerPart, modelPart] = modelId.split('::', 2)
-    provider = provider || providerPart.trim()
-    modelId = modelPart.trim()
-  }
-
-  if (!provider || !modelId) {
-    throw new Error('Preset model configuration is missing provider/modelId.')
-  }
-  return { provider: provider.toLowerCase(), modelId }
-}
-
-function applySelectedPresetToSelections() {
-  if (!isPresetMode.value) return
-  const { provider, modelId } = parsePresetModelConfig()
-  const key = buildModelKey(provider, modelId)
-  const model = modelCatalog.value.find((item) => item.key === key)
-  if (!model) {
-    throw new Error(`Preset model '${provider}::${modelId}' is not available in provider catalog.`)
-  }
-
-  const baseSettings = getDefaultSettings(model)
-  const generationParams = selectedPresetVersion.value?.generationParams || {}
-  const mode = typeof presetReferenceRules.value.referenceMode === 'string' ? presetReferenceRules.value.referenceMode : 'none'
-
-  selectionSettings.value[key] = {
-    ...baseSettings,
-    size: typeof generationParams.size === 'string' ? generationParams.size : baseSettings.size,
-    quality: typeof generationParams.quality === 'string' ? generationParams.quality : baseSettings.quality,
-    steps: generationParams.steps ? String(generationParams.steps) : baseSettings.steps,
-    useReferenceImages: model.supportsImageEdit && mode !== 'none',
-  }
-  selectedModelKeys.value = [key]
+function isModelLockedByPreset(item) {
+  return Boolean(isPresetMode.value && selectedPresetI2iOnly.value && !item.supportsImageEdit)
 }
 
 function initializePresetVariables() {
@@ -280,22 +244,6 @@ function renderPresetPromptOrThrow() {
   return parts.join('\n\n')
 }
 
-function validatePresetReferences() {
-  if (!isPresetMode.value) return
-  const mode = typeof presetReferenceRules.value.referenceMode === 'string' ? presetReferenceRules.value.referenceMode : 'none'
-  const maxReferenceImages = Number.parseInt(String(presetReferenceRules.value.maxReferenceImages || 0), 10)
-
-  if (mode === 'none' && editImages.value.length > 0) {
-    throw new Error('This preset does not allow reference images.')
-  }
-  if (mode === 'required' && editImages.value.length === 0) {
-    throw new Error('This preset requires at least one reference image.')
-  }
-  if (Number.isFinite(maxReferenceImages) && maxReferenceImages > 0 && editImages.value.length > maxReferenceImages) {
-    throw new Error(`This preset allows up to ${maxReferenceImages} reference images.`)
-  }
-}
-
 async function loadProviderOptions() {
   const response = await fetch(`${props.apiBaseUrl}/api/providers`)
   const payload = await response.json().catch(() => ({}))
@@ -344,25 +292,21 @@ async function generateImages() {
 
   try {
     let finalPrompt = prompt.value.trim()
-    let selections = []
+    if (!selectedModels.value.length) {
+      throw new Error('Select at least one model.')
+    }
+    if (selectedPresetI2iOnly.value && selectedModels.value.some((item) => !item.supportsImageEdit)) {
+      throw new Error('This preset is limited to i2i-capable models.')
+    }
 
     if (isPresetMode.value) {
-      validatePresetReferences()
-      applySelectedPresetToSelections()
       finalPrompt = renderPresetPromptOrThrow()
-      selections = buildSelectionsPayload()
-      if (!selections.length) {
-        throw new Error('Preset model could not be resolved to a selection.')
-      }
     } else {
       if (!finalPrompt) {
         throw new Error('Prompt is required.')
       }
-      if (!selectedModels.value.length) {
-        throw new Error('Select at least one model.')
-      }
-      selections = buildSelectionsPayload()
     }
+    const selections = buildSelectionsPayload()
 
     const response = await fetch(`${props.apiBaseUrl}/api/images/generate`, {
       method: 'POST',
@@ -497,9 +441,17 @@ async function handleEditImagesChange(event) {
 }
 
 function onPresetChange() {
-  if (!isPresetMode.value) return
+  if (!isPresetMode.value) {
+    presetVariables.value = {}
+    return
+  }
+  if (selectedPresetI2iOnly.value) {
+    selectedModelKeys.value = selectedModelKeys.value.filter((key) => {
+      const item = modelCatalog.value.find((entry) => entry.key === key)
+      return Boolean(item?.supportsImageEdit)
+    })
+  }
   initializePresetVariables()
-  applySelectedPresetToSelections()
 }
 
 watch(
@@ -545,6 +497,7 @@ onMounted(async () => {
 
         <div v-if="isPresetMode" class="preset-box">
           <p class="field-hint">Using preset version {{ selectedPresetVersion.version }}.</p>
+          <p v-if="selectedPresetI2iOnly" class="field-hint">This preset only allows models with i2i support.</p>
           <div v-for="variable in presetVariablesSchema" :key="variable.name" class="control-field">
             <label class="prompt-label">{{ variable.name }}<span v-if="variable.required"> *</span></label>
             <select
@@ -570,12 +523,12 @@ onMounted(async () => {
           <h2>Model Targets</h2>
         </div>
 
-        <div class="model-controls" :class="{ disabled: isPresetMode }">
+        <div class="model-controls">
           <div class="model-controls-header">
             <p class="summary-line">{{ selectedModels.length }} selected · {{ providerNames.length }} providers</p>
             <div class="action-row">
-              <button type="button" class="secondary" :disabled="isLoading || isPresetMode" @click="selectAllModels">Select All</button>
-              <button type="button" class="secondary" :disabled="isLoading || isPresetMode" @click="clearModelSelection">Clear</button>
+              <button type="button" class="secondary" :disabled="isLoading" @click="selectAllModels">Select All</button>
+              <button type="button" class="secondary" :disabled="isLoading" @click="clearModelSelection">Clear</button>
             </div>
           </div>
 
@@ -584,18 +537,19 @@ onMounted(async () => {
               v-for="item in modelCatalog"
               :key="item.key"
               class="model-card"
-              :class="{ selected: selectedModelKeys.includes(item.key) }"
+              :class="{ selected: selectedModelKeys.includes(item.key), locked: isModelLockedByPreset(item) }"
             >
               <label class="model-toggle">
                 <input
                   type="checkbox"
                   :checked="selectedModelKeys.includes(item.key)"
-                  :disabled="isLoading || isPresetMode"
+                  :disabled="isLoading || isModelLockedByPreset(item)"
                   @change="toggleModelSelection(item.key)"
                 />
                 <div>
                   <p class="model-title">{{ item.label }}</p>
                   <p class="model-subtitle">{{ item.provider }}</p>
+                  <p v-if="isModelLockedByPreset(item)" class="model-note">Disabled by preset i2i-only mode</p>
                 </div>
               </label>
 
@@ -605,7 +559,7 @@ onMounted(async () => {
                   <select
                     :id="`size-${item.key}`"
                     v-model="selectionSettings[item.key].size"
-                    :disabled="isLoading || isPresetMode"
+                    :disabled="isLoading"
                     @focus="ensureSettings(item)"
                   >
                     <option v-for="option in item.sizes" :key="option" :value="option">{{ option }}</option>
@@ -617,7 +571,7 @@ onMounted(async () => {
                   <select
                     :id="`quality-${item.key}`"
                     v-model="selectionSettings[item.key].quality"
-                    :disabled="isLoading || isPresetMode"
+                    :disabled="isLoading"
                     @focus="ensureSettings(item)"
                   >
                     <option v-for="option in item.qualities" :key="option" :value="option">{{ option }}</option>
@@ -631,7 +585,7 @@ onMounted(async () => {
                     v-model="selectionSettings[item.key].steps"
                     type="number"
                     min="1"
-                    :disabled="isLoading || isPresetMode"
+                    :disabled="isLoading"
                     @focus="ensureSettings(item)"
                   />
                 </div>
@@ -640,7 +594,7 @@ onMounted(async () => {
                   <input
                     v-model="selectionSettings[item.key].useReferenceImages"
                     type="checkbox"
-                    :disabled="isLoading || isPresetMode"
+                    :disabled="isLoading"
                     @focus="ensureSettings(item)"
                   />
                   <span>Use reference images</span>
@@ -779,10 +733,6 @@ onMounted(async () => {
   gap: 0.75rem;
 }
 
-.model-controls.disabled {
-  opacity: 0.85;
-}
-
 .model-controls-header {
   display: flex;
   align-items: center;
@@ -829,6 +779,10 @@ onMounted(async () => {
   background: #f1fff8;
 }
 
+.model-card.locked {
+  opacity: 0.58;
+}
+
 .model-toggle {
   display: flex;
   align-items: start;
@@ -848,6 +802,12 @@ onMounted(async () => {
   color: #6f5a4a;
   text-transform: capitalize;
   font-size: 0.82rem;
+}
+
+.model-note {
+  margin: 0.18rem 0 0;
+  color: #8a5141;
+  font-size: 0.74rem;
 }
 
 .model-settings {

@@ -16,43 +16,20 @@ const isLoading = ref(false)
 const error = ref('')
 const success = ref('')
 
-const providerOptions = ref({})
-
 const form = ref(defaultForm())
+const presetReferenceImages = ref([])
+const uploadedReferenceImages = ref([])
+const MAX_REFERENCE_IMAGES = 16
 
 const selectedPreset = computed(() => presets.value.find((preset) => preset.id === selectedPresetId.value) || null)
-const modelOptions = computed(() => {
-  const provider = form.value.modelConfig.provider
-  const providerMeta = providerOptions.value[provider] || {}
-  const models = Array.isArray(providerMeta.models) ? providerMeta.models : []
-  return models
-    .map((model) => {
-      if (typeof model === 'string') {
-        return { id: model, label: model }
-      }
-      if (!model || typeof model !== 'object') {
-        return null
-      }
-      const id = typeof model.id === 'string' ? model.id.trim() : ''
-      if (!id) return null
-      return { id, label: typeof model.label === 'string' && model.label.trim() ? model.label.trim() : id }
-    })
-    .filter(Boolean)
-})
+const effectiveReferenceImages = computed(() =>
+  uploadedReferenceImages.value.length ? uploadedReferenceImages.value : presetReferenceImages.value,
+)
 
 function defaultForm() {
   return {
     mode: 'create',
     sourcePresetId: '',
-    name: '',
-    description: '',
-    tagsCsv: '',
-    createdBy: 'local-user',
-    modelConfig: {
-      provider: '',
-      modelId: '',
-      modelVariant: '',
-    },
     promptingConfig: {
       systemPrompt: '',
       promptTemplate: '',
@@ -61,29 +38,7 @@ function defaultForm() {
     inputSchema: {
       variables: [],
     },
-    generationParams: {
-      steps: '',
-      guidanceScale: '',
-      seedMode: 'random',
-      seed: '',
-      strength: '',
-      aspectRatio: '',
-      width: '',
-      height: '',
-      numImages: '1',
-      size: '',
-      quality: '',
-    },
-    referenceRules: {
-      referenceMode: 'none',
-      maxReferenceImages: '',
-      referencePurpose: 'style',
-    },
-    outputRules: {
-      outputFormat: 'png',
-      upscale: 'none',
-      postprocess: '',
-    },
+    i2iOnly: false,
   }
 }
 
@@ -100,20 +55,6 @@ function addVariable() {
 
 function removeVariable(index) {
   form.value.inputSchema.variables.splice(index, 1)
-}
-
-function normalizeTags(csv) {
-  return String(csv || '')
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean)
-}
-
-function toNumber(value) {
-  const text = String(value ?? '').trim()
-  if (!text) return undefined
-  const parsed = Number(text)
-  return Number.isFinite(parsed) ? parsed : undefined
 }
 
 function buildPayload() {
@@ -135,16 +76,7 @@ function buildPayload() {
     })
     .filter(Boolean)
 
-  return {
-    name: form.value.name,
-    description: form.value.description,
-    tags: normalizeTags(form.value.tagsCsv),
-    createdBy: form.value.createdBy,
-    modelConfig: {
-      provider: form.value.modelConfig.provider,
-      modelId: form.value.modelConfig.modelId,
-      modelVariant: String(form.value.modelConfig.modelVariant || '').trim() || undefined,
-    },
+  const payload = {
     promptingConfig: {
       systemPrompt: String(form.value.promptingConfig.systemPrompt || '').trim() || undefined,
       promptTemplate: form.value.promptingConfig.promptTemplate,
@@ -153,56 +85,26 @@ function buildPayload() {
     inputSchema: {
       variables,
     },
-    generationParams: {
-      steps: toNumber(form.value.generationParams.steps),
-      guidanceScale: toNumber(form.value.generationParams.guidanceScale),
-      seedMode: form.value.generationParams.seedMode,
-      seed: toNumber(form.value.generationParams.seed),
-      strength: toNumber(form.value.generationParams.strength),
-      aspectRatio: String(form.value.generationParams.aspectRatio || '').trim() || undefined,
-      width: toNumber(form.value.generationParams.width),
-      height: toNumber(form.value.generationParams.height),
-      numImages: toNumber(form.value.generationParams.numImages),
-      size: String(form.value.generationParams.size || '').trim() || undefined,
-      quality: String(form.value.generationParams.quality || '').trim() || undefined,
-    },
-    referenceRules: {
-      referenceMode: form.value.referenceRules.referenceMode,
-      maxReferenceImages: toNumber(form.value.referenceRules.maxReferenceImages),
-      referencePurpose: form.value.referenceRules.referencePurpose,
-    },
-    outputRules: {
-      outputFormat: form.value.outputRules.outputFormat,
-      upscale: form.value.outputRules.upscale,
-      postprocess: String(form.value.outputRules.postprocess || '')
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean),
-    },
+    i2iOnly: Boolean(form.value.i2iOnly),
   }
+  if (uploadedReferenceImages.value.length) {
+    payload.referenceImages = uploadedReferenceImages.value.map((image) => ({
+      name: image.name,
+      mime_type: image.mime_type,
+      data_url: image.data_url,
+    }))
+  }
+  return payload
 }
 
 function populateFormFromPreset(preset) {
   const version = preset?.version || {}
-  const modelConfig = version.modelConfig || {}
   const promptingConfig = version.promptingConfig || {}
   const inputSchema = version.inputSchema || {}
-  const generationParams = version.generationParams || {}
-  const referenceRules = version.referenceRules || {}
-  const outputRules = version.outputRules || {}
 
   form.value = {
     mode: 'edit',
     sourcePresetId: preset.id,
-    name: preset.name || '',
-    description: preset.description || '',
-    tagsCsv: Array.isArray(preset.tags) ? preset.tags.join(', ') : '',
-    createdBy: preset.createdBy || 'local-user',
-    modelConfig: {
-      provider: modelConfig.provider || '',
-      modelId: modelConfig.modelId || modelConfig.model || '',
-      modelVariant: modelConfig.modelVariant || '',
-    },
     promptingConfig: {
       systemPrompt: promptingConfig.systemPrompt || '',
       promptTemplate: promptingConfig.promptTemplate || '',
@@ -220,44 +122,64 @@ function populateFormFromPreset(preset) {
           }))
         : [],
     },
-    generationParams: {
-      steps: generationParams.steps ?? '',
-      guidanceScale: generationParams.guidanceScale ?? '',
-      seedMode: generationParams.seedMode || 'random',
-      seed: generationParams.seed ?? '',
-      strength: generationParams.strength ?? '',
-      aspectRatio: generationParams.aspectRatio || '',
-      width: generationParams.width ?? '',
-      height: generationParams.height ?? '',
-      numImages: generationParams.numImages ?? '1',
-      size: generationParams.size || '',
-      quality: generationParams.quality || '',
-    },
-    referenceRules: {
-      referenceMode: referenceRules.referenceMode || 'none',
-      maxReferenceImages: referenceRules.maxReferenceImages ?? '',
-      referencePurpose: referenceRules.referencePurpose || 'style',
-    },
-    outputRules: {
-      outputFormat: outputRules.outputFormat || 'png',
-      upscale: outputRules.upscale || 'none',
-      postprocess: Array.isArray(outputRules.postprocess) ? outputRules.postprocess.join(', ') : '',
-    },
+    i2iOnly: Boolean(version.i2iOnly),
   }
+  presetReferenceImages.value = Array.isArray(version.referenceImages) ? version.referenceImages : []
+  uploadedReferenceImages.value = []
 }
 
 function startNewPreset() {
   selectedPresetId.value = ''
   form.value = defaultForm()
+  presetReferenceImages.value = []
+  uploadedReferenceImages.value = []
 }
 
-async function loadProviderOptions() {
-  const response = await fetch(`${props.apiBaseUrl}/api/providers`)
-  const payload = await response.json().catch(() => ({}))
-  if (!response.ok || !payload || typeof payload !== 'object') {
-    throw new Error('Failed to load provider options.')
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        reject(new Error(`Unable to read '${file.name}'.`))
+        return
+      }
+      resolve(reader.result)
+    }
+    reader.onerror = () => {
+      reject(new Error(`Unable to read '${file.name}'.`))
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+async function handlePresetReferenceImagesChange(event) {
+  const fileList = Array.from(event?.target?.files || [])
+  if (!fileList.length) {
+    uploadedReferenceImages.value = []
+    return
   }
-  providerOptions.value = payload
+  const limitedFiles = fileList.slice(0, MAX_REFERENCE_IMAGES)
+  try {
+    uploadedReferenceImages.value = await Promise.all(
+      limitedFiles.map(async (file) => {
+        const dataUrl = await readFileAsDataUrl(file)
+        return {
+          id: `upload-${file.name}-${file.size}-${file.lastModified}`,
+          name: file.name || 'preset-reference.png',
+          mime_type: file.type || 'image/png',
+          data_url: dataUrl,
+          image_url: dataUrl,
+        }
+      }),
+    )
+  } catch (uploadError) {
+    uploadedReferenceImages.value = []
+    error.value = uploadError instanceof Error ? uploadError.message : 'Failed to parse preset reference images.'
+  }
+}
+
+function clearPresetReferenceUploads() {
+  uploadedReferenceImages.value = []
 }
 
 async function loadPresets() {
@@ -317,7 +239,6 @@ async function duplicateSelectedPreset() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: duplicateName,
-        createdBy: form.value.createdBy || 'local-user',
       }),
     })
     const data = await response.json().catch(() => ({}))
@@ -351,7 +272,7 @@ function onSelectPreset() {
 
 onMounted(async () => {
   try {
-    await Promise.all([loadProviderOptions(), loadPresets()])
+    await loadPresets()
   } catch (loadError) {
     error.value = loadError instanceof Error ? loadError.message : 'Failed to load presets.'
   }
@@ -380,10 +301,6 @@ onMounted(async () => {
         >
           <div class="preset-main">
             <strong>{{ preset.name }}</strong>
-            <p v-if="preset.description" class="preset-desc">{{ preset.description }}</p>
-            <div v-if="Array.isArray(preset.tags) && preset.tags.length" class="chip-row">
-              <span v-for="tag in preset.tags.slice(0, 3)" :key="`${preset.id}-${tag}`" class="chip">#{{ tag }}</span>
-            </div>
           </div>
           <span class="version-badge">v{{ preset.latestVersion }}</span>
         </button>
@@ -403,49 +320,12 @@ onMounted(async () => {
       </div>
 
       <div class="section-card">
-        <h3>Identity</h3>
-        <div class="form-grid">
-          <div class="control-field">
-            <label>Name</label>
-            <input v-model="form.name" :disabled="isLoading" />
-          </div>
-          <div class="control-field">
-            <label>Created By</label>
-            <input v-model="form.createdBy" :disabled="isLoading" />
-          </div>
-          <div class="control-field full">
-            <label>Description</label>
-            <textarea v-model="form.description" rows="2" :disabled="isLoading" />
-          </div>
-          <div class="control-field full">
-            <label>Tags (comma separated)</label>
-            <input v-model="form.tagsCsv" :disabled="isLoading" />
-          </div>
-        </div>
-      </div>
-
-      <div class="section-card">
-        <h3>Model Config</h3>
-        <div class="form-grid">
-          <div class="control-field">
-            <label>Provider</label>
-            <select v-model="form.modelConfig.provider" :disabled="isLoading">
-              <option value="">Select provider</option>
-              <option v-for="providerName in Object.keys(providerOptions)" :key="providerName" :value="providerName">{{ providerName }}</option>
-            </select>
-          </div>
-          <div class="control-field">
-            <label>Model</label>
-            <select v-model="form.modelConfig.modelId" :disabled="isLoading">
-              <option value="">Select model</option>
-              <option v-for="model in modelOptions" :key="model.id" :value="model.id">{{ model.label }}</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      <div class="section-card">
         <h3>Prompting</h3>
+        <p class="field-hint">Presets define design language and prompt structure. Model selection stays in Generate.</p>
+        <label class="flag">
+          <input v-model="form.i2iOnly" type="checkbox" :disabled="isLoading" />
+          limit to i2i-capable models only
+        </label>
         <div class="control-field">
           <label>Prompt Template</label>
           <textarea v-model="form.promptingConfig.promptTemplate" rows="3" :disabled="isLoading" placeholder="Poster about {{title}} in {{style}} style" />
@@ -482,57 +362,39 @@ onMounted(async () => {
       </div>
 
       <div class="section-card">
-        <h3>Generation Params</h3>
-        <div class="form-grid">
-          <div class="control-field"><label>Steps</label><input v-model="form.generationParams.steps" type="number" /></div>
-          <div class="control-field"><label>Guidance Scale</label><input v-model="form.generationParams.guidanceScale" type="number" step="0.1" /></div>
-          <div class="control-field"><label>Size</label><input v-model="form.generationParams.size" placeholder="1024x1024" /></div>
-          <div class="control-field"><label>Quality</label><input v-model="form.generationParams.quality" /></div>
+        <div class="section-head">
+          <h3>Preset Reference Images</h3>
+          <button
+            v-if="uploadedReferenceImages.length"
+            type="button"
+            class="secondary"
+            :disabled="isLoading"
+            @click="clearPresetReferenceUploads"
+          >
+            Revert Uploads
+          </button>
         </div>
-      </div>
-
-      <div class="section-card">
-        <h3>Reference Rules</h3>
-        <div class="form-grid">
-          <div class="control-field">
-            <label>Reference Mode</label>
-            <select v-model="form.referenceRules.referenceMode">
-              <option value="none">none</option>
-              <option value="optional">optional</option>
-              <option value="required">required</option>
-            </select>
-          </div>
-          <div class="control-field"><label>Max References</label><input v-model="form.referenceRules.maxReferenceImages" type="number" min="0" /></div>
-          <div class="control-field">
-            <label>Reference Purpose</label>
-            <select v-model="form.referenceRules.referencePurpose">
-              <option value="style">style</option>
-              <option value="content">content</option>
-              <option value="both">both</option>
-            </select>
-          </div>
+        <div class="control-field">
+          <label for="preset-reference-images">Upload references (optional)</label>
+          <input
+            id="preset-reference-images"
+            type="file"
+            accept="image/png,image/jpeg,image/webp"
+            multiple
+            :disabled="isLoading"
+            @change="handlePresetReferenceImagesChange"
+          />
+          <p class="field-hint">
+            {{ uploadedReferenceImages.length ? 'Uploads will replace current preset references on save.' : 'Leave empty to keep existing references.' }}
+          </p>
         </div>
-      </div>
-
-      <div class="section-card">
-        <h3>Output Rules</h3>
-        <div class="form-grid">
-          <div class="control-field">
-            <label>Output Format</label>
-            <select v-model="form.outputRules.outputFormat">
-              <option value="png">png</option>
-              <option value="jpg">jpg</option>
-              <option value="webp">webp</option>
-            </select>
-          </div>
-          <div class="control-field">
-            <label>Upscale</label>
-            <select v-model="form.outputRules.upscale">
-              <option value="none">none</option>
-              <option value="2x">2x</option>
-              <option value="4x">4x</option>
-            </select>
-          </div>
+        <div v-if="effectiveReferenceImages.length" class="reference-grid">
+          <img
+            v-for="(image, index) in effectiveReferenceImages"
+            :key="image.id || `${image.image_url}-${index}`"
+            :src="image.image_url"
+            :alt="image.name || `Preset reference ${index + 1}`"
+          />
         </div>
       </div>
 
@@ -637,34 +499,6 @@ h3 {
 
 .preset-main strong {
   line-height: 1.2;
-}
-
-.preset-desc {
-  margin: 0;
-  font-size: 0.78rem;
-  line-height: 1.35;
-  color: #7c6454;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.chip-row {
-  display: flex;
-  gap: 0.3rem;
-  flex-wrap: wrap;
-}
-
-.chip {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 999px;
-  border: 1px solid #d8cab8;
-  background: #fff5e7;
-  font-size: 0.68rem;
-  padding: 0.12rem 0.45rem;
-  color: #684f3f;
 }
 
 .version-badge {
@@ -787,6 +621,21 @@ button:disabled {
   border: 1px solid #ddccb8;
   border-radius: 12px;
   padding: 0.55rem;
+  background: #fffdf8;
+}
+
+.reference-grid {
+  display: grid;
+  gap: 0.55rem;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+}
+
+.reference-grid img {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid #d9c7b2;
   background: #fffdf8;
 }
 

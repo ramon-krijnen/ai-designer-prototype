@@ -18,9 +18,11 @@ class ImageStore:
         self._db_path = Path(db_path)
         self._image_dir = Path(image_dir)
         self._reference_dir = self._image_dir / "references"
+        self._preset_reference_dir = self._image_dir / "preset-references"
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._image_dir.mkdir(parents=True, exist_ok=True)
         self._reference_dir.mkdir(parents=True, exist_ok=True)
+        self._preset_reference_dir.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -95,6 +97,21 @@ class ImageStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS preset_reference_images (
+                    id TEXT PRIMARY KEY,
+                    preset_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    image_path TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    byte_size INTEGER NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS run_reference_images (
                     id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL,
@@ -131,6 +148,9 @@ class ImageStore:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_run_records_preset_id ON run_records(preset_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_presets_updated_at ON presets(updated_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_preset_versions_preset_id ON preset_versions(preset_id)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_preset_reference_images_preset_version ON preset_reference_images(preset_id, version)"
+            )
             if "image_base64" not in columns:
                 conn.execute("ALTER TABLE image_generations ADD COLUMN image_base64 TEXT")
                 rows = conn.execute(
@@ -477,6 +497,7 @@ class ImageStore:
         generation_params: dict[str, Any],
         reference_rules: dict[str, Any],
         output_rules: dict[str, Any] | None = None,
+        reference_images: tuple[InputImage, ...] = (),
     ) -> dict[str, Any]:
         now = datetime.now(UTC).isoformat()
         preset_id = str(uuid4())
@@ -518,6 +539,13 @@ class ImageStore:
                     json.dumps(reference_rules, ensure_ascii=True),
                     json.dumps(output_rules or {}, ensure_ascii=True),
                 ),
+            )
+            self._insert_preset_reference_images(
+                conn,
+                preset_id=preset_id,
+                version=1,
+                created_at=now,
+                reference_images=reference_images,
             )
         preset = self.get_preset(preset_id)
         if preset is None:
@@ -593,6 +621,52 @@ class ImageStore:
             return None
         return self._normalize_preset_version_row(dict(row))
 
+    def list_preset_reference_images(self, preset_id: str, version: int) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, preset_id, version, created_at, name, mime_type, image_path, sha256, byte_size
+                FROM preset_reference_images
+                WHERE preset_id = ? AND version = ?
+                ORDER BY created_at ASC
+                """,
+                (preset_id, version),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def preset_reference_image_file_path(self, reference_id: str) -> Path | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT image_path FROM preset_reference_images WHERE id = ?",
+                (reference_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        path = Path(row["image_path"])
+        if not path.exists():
+            return None
+        return path
+
+    def get_preset_reference_input_images(self, preset_id: str, version: int) -> tuple[InputImage, ...]:
+        rows = self.list_preset_reference_images(preset_id, version)
+        images: list[InputImage] = []
+        for row in rows:
+            path = Path(row["image_path"])
+            if not path.exists():
+                continue
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+            images.append(
+                InputImage(
+                    data=data,
+                    filename=str(row.get("name") or "preset-reference.png"),
+                    mime_type=str(row.get("mime_type") or "image/png"),
+                )
+            )
+        return tuple(images)
+
     def create_preset_version(
         self,
         preset_id: str,
@@ -603,6 +677,7 @@ class ImageStore:
         generation_params: dict[str, Any],
         reference_rules: dict[str, Any],
         output_rules: dict[str, Any] | None = None,
+        reference_images: tuple[InputImage, ...] | None = None,
         name: str | None = None,
         description: str | None = None,
         tags: list[str] | None = None,
@@ -638,6 +713,16 @@ class ImageStore:
                     json.dumps(output_rules or {}, ensure_ascii=True),
                 ),
             )
+            if reference_images is None:
+                self._copy_preset_reference_images(conn, preset_id=preset_id, from_version=next_version - 1, to_version=next_version, created_at=now)
+            else:
+                self._insert_preset_reference_images(
+                    conn,
+                    preset_id=preset_id,
+                    version=next_version,
+                    created_at=now,
+                    reference_images=reference_images,
+                )
             conn.execute(
                 """
                 UPDATE presets
@@ -671,6 +756,10 @@ class ImageStore:
         source_version = self.get_preset_version(source_preset_id)
         if source_preset is None or source_version is None:
             raise ValueError("Source preset not found")
+        source_reference_images = self.get_preset_reference_input_images(
+            source_preset_id,
+            source_version["version"],
+        )
         return self.create_preset(
             name=name,
             description=description if description is not None else source_preset["description"],
@@ -682,6 +771,90 @@ class ImageStore:
             generation_params=source_version["generation_params"],
             reference_rules=source_version["reference_rules"],
             output_rules=source_version["output_rules"],
+            reference_images=source_reference_images,
+        )
+
+    def _insert_preset_reference_images(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        preset_id: str,
+        version: int,
+        created_at: str,
+        reference_images: tuple[InputImage, ...],
+    ) -> None:
+        rows = []
+        for reference_image in reference_images:
+            reference_id = str(uuid4())
+            extension = self._guess_extension(reference_image.mime_type)
+            image_path = self._preset_reference_dir / f"{reference_id}{extension}"
+            image_path.write_bytes(reference_image.data)
+            rows.append(
+                {
+                    "id": reference_id,
+                    "preset_id": preset_id,
+                    "version": version,
+                    "created_at": created_at,
+                    "name": reference_image.filename,
+                    "mime_type": reference_image.mime_type,
+                    "image_path": str(image_path),
+                    "sha256": hashlib.sha256(reference_image.data).hexdigest(),
+                    "byte_size": len(reference_image.data),
+                }
+            )
+        if not rows:
+            return
+        conn.executemany(
+            """
+            INSERT INTO preset_reference_images (
+                id, preset_id, version, created_at, name, mime_type, image_path, sha256, byte_size
+            ) VALUES (
+                :id, :preset_id, :version, :created_at, :name, :mime_type, :image_path, :sha256, :byte_size
+            )
+            """,
+            rows,
+        )
+
+    def _copy_preset_reference_images(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        preset_id: str,
+        from_version: int,
+        to_version: int,
+        created_at: str,
+    ) -> None:
+        rows = conn.execute(
+            """
+            SELECT name, mime_type, image_path
+            FROM preset_reference_images
+            WHERE preset_id = ? AND version = ?
+            ORDER BY created_at ASC
+            """,
+            (preset_id, from_version),
+        ).fetchall()
+        copied_images: list[InputImage] = []
+        for row in rows:
+            path = Path(row["image_path"])
+            if not path.exists():
+                continue
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+            copied_images.append(
+                InputImage(
+                    data=data,
+                    filename=str(row["name"]),
+                    mime_type=str(row["mime_type"]),
+                )
+            )
+        self._insert_preset_reference_images(
+            conn,
+            preset_id=preset_id,
+            version=to_version,
+            created_at=created_at,
+            reference_images=tuple(copied_images),
         )
 
     @staticmethod

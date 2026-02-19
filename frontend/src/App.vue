@@ -16,7 +16,7 @@ const activeDescription = computed(() => {
     return 'Compose runs across providers, or apply a saved preset for reproducible output.'
   }
   if (activeTab.value === 'presets') {
-    return 'Build reusable generation setups with versioned prompt templates and model settings.'
+    return 'Build reusable design presets with versioned prompt templates and input variables.'
   }
   return 'Inspect historical runs, compare prompts, and revisit references.'
 })
