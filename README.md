@@ -18,7 +18,7 @@ Monorepo for an AI image generation app with:
 - Node.js 20+
 - npm
 - OpenAI API key (for OpenAI provider)
-- Gemini API key (for Gemini provider)
+- Gemini / Google AI Studio API key (for Gemini provider)
 - Krea API key (for Krea provider)
 
 ## Backend Setup
@@ -32,8 +32,10 @@ cp .env.example .env
 ```
 
 Update `backend/.env` with provider credentials you use.
-For Gemini, preferred:
+For Gemini (Nano Banana / Nano Banana Pro), set one:
 - `GEMINI_API_KEY`
+- `GOOGLE_API_KEY` (Google AI Studio key)
+- `AI_STUDIO_API_KEY`
 
 Gemini fallback mode (ADC/Vertex):
 - `GOOGLE_CLOUD_PROJECT`
@@ -144,13 +146,18 @@ curl -X POST http://127.0.0.1:5000/api/images/krea \
   -d '{"prompt":"a serene mountain landscape at sunset","model":"flux_1_dev","size":"1024x576","steps":28}'
 ```
 
-Gemini examples:
+Gemini examples (Nano Banana models):
 
 ```bash
-# Nano Banana (Gemini 2.5 image preview)
+# Nano Banana (Gemini 2.5 Flash Image)
 curl -X POST http://127.0.0.1:5000/api/images/gemini \
   -H "Content-Type: application/json" \
   -d '{"prompt":"a cinematic food photo of ramen on a rainy neon street","model":"gemini-2.5-flash-image"}'
+
+# Nano Banana Pro
+curl -X POST http://127.0.0.1:5000/api/images/gemini \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"architectural editorial photo of a museum lobby in soft morning haze","model":"gemini-3-pro-image-preview"}'
 
 # Image edit style request with one source image
 curl -X POST http://127.0.0.1:5000/api/images/generate \
@@ -168,6 +175,10 @@ curl -X POST http://127.0.0.1:5000/api/images/generate \
     ]
   }'
 ```
+
+Nano Banana aliases supported in `model`:
+- `nano-banana`, `nano banana`, `nanobanana` -> `gemini-2.5-flash-image`
+- `nano-banana-pro`, `nano banana pro`, `nanobanana-pro` -> `gemini-3-pro-image-preview`
 
 ## Build Frontend
 

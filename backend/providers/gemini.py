@@ -15,7 +15,7 @@ class GeminiImageProvider:
     OPTIONS = {
         "models": [
             {"id": "gemini-2.5-flash-image", "label": "gemini-2.5-flash-image (Nano Banana)"},
-            {"id": "gemini-3-pro-image-preview", "label": "gemini-3-pro-image-preview (Nano Banana)"},
+            {"id": "gemini-3-pro-image-preview", "label": "gemini-3-pro-image-preview (Nano Banana Pro)"},
         ],
         "sizes": ["1:1", "3:2", "2:3", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"],
         "qualities": [],
@@ -28,8 +28,14 @@ class GeminiImageProvider:
 
     _MODEL_ALIASES = {
         "nano-banana": "gemini-2.5-flash-image",
+        "nano banana": "gemini-2.5-flash-image",
+        "nanobanana": "gemini-2.5-flash-image",
         "gemini-2.5-flash-image": "gemini-2.5-flash-image",
         "gemini-2.5-flash-image-preview": "gemini-2.5-flash-image",
+        "nano-banana-pro": "gemini-3-pro-image-preview",
+        "nano banana pro": "gemini-3-pro-image-preview",
+        "nanobanana-pro": "gemini-3-pro-image-preview",
+        "nanobanana pro": "gemini-3-pro-image-preview",
         "gemini-3-pro-image-preview": "gemini-3-pro-image-preview",
     }
     _ASPECT_RATIO_ALIASES = {
@@ -53,6 +59,7 @@ class GeminiImageProvider:
     def __init__(self) -> None:
         api_key = (
             os.getenv("GEMINI_API_KEY")
+            or os.getenv("AI_STUDIO_API_KEY")
             or os.getenv("GEMIN_API_KEY")
             or os.getenv("GOOGLE_API_KEY")
             or os.getenv("GOOGLE_CLOUD_KEY")
@@ -66,7 +73,7 @@ class GeminiImageProvider:
         project = (os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GCP_PROJECT") or "").strip()
         if not project:
             raise ValueError(
-                "Gemini requires GEMINI_API_KEY (or alias) for API key mode, or GOOGLE_CLOUD_PROJECT for ADC mode"
+                "Gemini requires GEMINI_API_KEY/GOOGLE_API_KEY/AI_STUDIO_API_KEY for AI Studio API key mode, or GOOGLE_CLOUD_PROJECT for ADC mode"
             )
 
         credentials_path = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
