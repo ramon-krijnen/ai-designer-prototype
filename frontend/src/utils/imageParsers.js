@@ -68,6 +68,7 @@ function candidateMetadata(candidate) {
     model: pickStringField(candidate.model),
     size: pickStringField(candidate.size),
     quality: pickStringField(candidate.quality),
+    renderMs: Number.isFinite(candidate.render_ms) ? Number(candidate.render_ms) : 0,
     sha256: pickStringField(candidate.sha256),
     createdAt: formatTimestamp(candidate.created_at),
   }
@@ -115,6 +116,7 @@ export function parseStoredImageRecord(record, index, apiBaseUrl = '') {
     model: pickStringField(record.model),
     size: pickStringField(record.size),
     quality: pickStringField(record.quality),
+    renderMs: Number.isFinite(record.render_ms) ? Number(record.render_ms) : 0,
     sha256: pickStringField(record.sha256),
     createdAt: formatTimestamp(record.created_at),
   }

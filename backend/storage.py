@@ -42,6 +42,7 @@ class ImageStore:
                     model TEXT NOT NULL,
                     prompt TEXT NOT NULL,
                     revised_prompt TEXT,
+                    render_ms INTEGER,
                     size TEXT,
                     quality TEXT,
                     image_path TEXT NOT NULL,
@@ -129,6 +130,8 @@ class ImageStore:
                 conn.execute("ALTER TABLE image_generations ADD COLUMN run_id TEXT")
                 conn.execute("UPDATE image_generations SET run_id = id WHERE run_id IS NULL OR run_id = ''")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_image_generations_run_id ON image_generations(run_id)")
+            if "render_ms" not in columns:
+                conn.execute("ALTER TABLE image_generations ADD COLUMN render_ms INTEGER")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_image_generations_created_at ON image_generations(created_at DESC)"
             )
@@ -248,6 +251,7 @@ class ImageStore:
         request_payload: dict[str, Any],
         result: ImageGenerationResult,
         run_id: str | None = None,
+        render_ms: int | None = None,
     ) -> dict[str, Any]:
         image_id = str(uuid4())
         effective_run_id = run_id or image_id
@@ -266,6 +270,7 @@ class ImageStore:
             "model": result.model,
             "prompt": result.prompt,
             "revised_prompt": result.revised_prompt,
+            "render_ms": render_ms,
             "size": result.size,
             "quality": result.quality,
             "image_path": str(image_path),
@@ -273,17 +278,23 @@ class ImageStore:
             "sha256": image_hash,
             "image_base64": result.image_base64,
             "request_json": json.dumps(request_payload, ensure_ascii=True),
-            "response_json": json.dumps(self._extract_response_fields(result), ensure_ascii=True),
+            "response_json": json.dumps(
+                {
+                    **self._extract_response_fields(result),
+                    "render_ms": render_ms,
+                },
+                ensure_ascii=True,
+            ),
         }
 
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO image_generations (
-                    id, run_id, created_at, provider, model, prompt, revised_prompt,
+                    id, run_id, created_at, provider, model, prompt, revised_prompt, render_ms,
                     size, quality, image_path, mime_type, sha256, image_base64, request_json, response_json
                 ) VALUES (
-                    :id, :run_id, :created_at, :provider, :model, :prompt, :revised_prompt,
+                    :id, :run_id, :created_at, :provider, :model, :prompt, :revised_prompt, :render_ms,
                     :size, :quality, :image_path, :mime_type, :sha256, :image_base64, :request_json, :response_json
                 )
                 """,
@@ -296,7 +307,7 @@ class ImageStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, run_id, created_at, provider, model, prompt, revised_prompt, size, quality,
+                SELECT id, run_id, created_at, provider, model, prompt, revised_prompt, render_ms, size, quality,
                        image_path, mime_type, sha256
                 FROM image_generations
                 ORDER BY created_at DESC
@@ -310,7 +321,7 @@ class ImageStore:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, run_id, created_at, provider, model, prompt, revised_prompt, size, quality,
+                SELECT id, run_id, created_at, provider, model, prompt, revised_prompt, render_ms, size, quality,
                        image_path, mime_type, sha256, image_base64, request_json, response_json
                 FROM image_generations
                 WHERE id = ?
@@ -396,7 +407,7 @@ class ImageStore:
             placeholders = ",".join("?" for _ in run_ids)
             image_rows = conn.execute(
                 f"""
-                SELECT id, run_id, created_at, provider, model, prompt, revised_prompt, size, quality,
+                SELECT id, run_id, created_at, provider, model, prompt, revised_prompt, render_ms, size, quality,
                        image_path, mime_type, sha256
                 FROM image_generations
                 WHERE run_id IN ({placeholders})
@@ -461,7 +472,7 @@ class ImageStore:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, run_id, created_at, provider, model, prompt, revised_prompt, size, quality,
+                SELECT id, run_id, created_at, provider, model, prompt, revised_prompt, render_ms, size, quality,
                        image_path, mime_type, sha256
                 FROM image_generations
                 WHERE run_id = ?
@@ -876,6 +887,7 @@ class ImageStore:
             "model": result.model,
             "prompt": result.prompt,
             "revised_prompt": result.revised_prompt,
+            "render_ms": None,
             "size": result.size,
             "quality": result.quality,
         }
@@ -887,6 +899,7 @@ class ImageStore:
             "model": record.get("model"),
             "prompt": record.get("prompt"),
             "revised_prompt": record.get("revised_prompt"),
+            "render_ms": record.get("render_ms"),
             "size": record.get("size"),
             "quality": record.get("quality"),
         }

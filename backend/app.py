@@ -5,6 +5,7 @@ import binascii
 import os
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -457,8 +458,10 @@ def _generate_single_image(
         steps=selection.get("steps"),
         reference_images=reference_images if selection.get("use_reference_images") else (),
     )
+    started_at = time.perf_counter()
     result = provider.generate(request_for_model)
-    image_store.save_generation(payload, result, run_id=run_id)
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    image_store.save_generation(payload, result, run_id=run_id, render_ms=max(elapsed_ms, 0))
     return {"revised_prompt": result.revised_prompt}
 
 
@@ -991,4 +994,4 @@ def _infer_total_from_request(request_payload: dict[str, Any]) -> int:
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=False)
