@@ -12,10 +12,11 @@ from http import HTTPStatus
 from typing import Any
 from uuid import uuid4
 
-from flask import Flask, jsonify, request, send_file, url_for
+from flask import Flask, g, jsonify, request, send_file, url_for
 from providers.base import ImageGenerationRequest, InputImage
 from providers.registry import ProviderRegistry
 from storage import ImageStore
+from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__)
 provider_registry = ProviderRegistry()
@@ -28,6 +29,8 @@ generation_jobs: dict[str, dict[str, Any]] = {}
 generation_jobs_lock = threading.Lock()
 MAX_EDIT_IMAGES = 16
 MAX_EDIT_IMAGE_BYTES = 50 * 1024 * 1024
+MAX_ERROR_LOG_RESPONSE_BODY_CHARS = 4000
+MAX_ERROR_LOG_REQUEST_BODY_CHARS = 2000
 
 
 def _parse_payload(
@@ -73,6 +76,38 @@ def _parse_payload(
 @app.get("/")
 def health() -> tuple[dict[str, str], int]:
     return {"status": "ok", "service": "ai-designer-backend"}, HTTPStatus.OK
+
+
+@app.before_request
+def _mark_request_started() -> None:
+    g.request_started_at = time.perf_counter()
+
+
+@app.after_request
+def _log_failed_request(response: Any) -> Any:
+    if response.status_code < 400:
+        return response
+
+    started_at = getattr(g, "request_started_at", None)
+    duration_ms = int((time.perf_counter() - started_at) * 1000) if started_at is not None else -1
+    app.logger.error(
+        "Request failed method=%s path=%s status=%s duration_ms=%s request_body=%s response_body=%s",
+        request.method,
+        request.full_path.rstrip("?"),
+        response.status_code,
+        duration_ms,
+        _summarize_request_body(),
+        _truncate_for_log(_response_text(response), MAX_ERROR_LOG_RESPONSE_BODY_CHARS),
+    )
+    return response
+
+
+@app.errorhandler(Exception)
+def _handle_uncaught_exception(exc: Exception) -> tuple[Any, int] | Any:
+    if isinstance(exc, HTTPException):
+        return exc
+    app.logger.exception("Unhandled exception while processing request")
+    return jsonify({"error": "Internal server error"}), HTTPStatus.INTERNAL_SERVER_ERROR
 
 
 @app.post("/api/images/generate")
@@ -654,6 +689,51 @@ def _optional_bool(raw_value: Any, *, default: bool) -> bool:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _response_text(response: Any) -> str:
+    try:
+        return response.get_data(as_text=True)
+    except Exception:
+        return "<unreadable response body>"
+
+
+def _summarize_request_body() -> str:
+    if request.method in {"GET", "HEAD", "OPTIONS"}:
+        return "<none>"
+
+    content_type = (request.content_type or "").lower()
+    if "application/json" in content_type:
+        payload = request.get_json(silent=True)
+        if payload is None:
+            return "<invalid json>"
+        sanitized = _summarize_log_json(payload)
+        return _truncate_for_log(str(sanitized), MAX_ERROR_LOG_REQUEST_BODY_CHARS)
+
+    raw_body = request.get_data(cache=True, as_text=True) or ""
+    if not raw_body:
+        return "<empty>"
+    return _truncate_for_log(raw_body, MAX_ERROR_LOG_REQUEST_BODY_CHARS)
+
+
+def _summarize_log_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        summarized: dict[str, Any] = {}
+        for key, entry in value.items():
+            if key == "edit_images" and isinstance(entry, list):
+                summarized[key] = f"<{len(entry)} image payload(s) omitted>"
+                continue
+            summarized[key] = _summarize_log_json(entry)
+        return summarized
+    if isinstance(value, list):
+        return [_summarize_log_json(item) for item in value]
+    return value
+
+
+def _truncate_for_log(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}...(truncated)"
 
 
 def _provider_supports_image_edit(provider_name: str) -> bool:
