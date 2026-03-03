@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
+import { readFileAsDataUrl } from '../../utils/imageParsers'
 
 const props = defineProps({
   apiBaseUrl: {
@@ -133,23 +134,6 @@ function startNewPreset() {
   form.value = defaultForm()
   presetReferenceImages.value = []
   uploadedReferenceImages.value = []
-}
-
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      if (typeof reader.result !== 'string') {
-        reject(new Error(`Unable to read '${file.name}'.`))
-        return
-      }
-      resolve(reader.result)
-    }
-    reader.onerror = () => {
-      reject(new Error(`Unable to read '${file.name}'.`))
-    }
-    reader.readAsDataURL(file)
-  })
 }
 
 async function handlePresetReferenceImagesChange(event) {

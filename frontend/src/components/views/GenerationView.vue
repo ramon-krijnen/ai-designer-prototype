@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
-import { dedupeImages, extractImages } from '../../utils/imageParsers'
+import { dedupeImages, extractImages, readFileAsDataUrl } from '../../utils/imageParsers'
 
 const props = defineProps({
   apiBaseUrl: {
@@ -393,23 +393,6 @@ function openImage(image) {
 
 function clearEditImages() {
   editImages.value = []
-}
-
-function readFileAsDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      if (typeof reader.result !== 'string') {
-        reject(new Error(`Unable to read '${file.name}'.`))
-        return
-      }
-      resolve(reader.result)
-    }
-    reader.onerror = () => {
-      reject(new Error(`Unable to read '${file.name}'.`))
-    }
-    reader.readAsDataURL(file)
-  })
 }
 
 async function handleEditImagesChange(event) {

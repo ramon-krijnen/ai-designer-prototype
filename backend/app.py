@@ -221,6 +221,8 @@ def get_run_status(run_id: str) -> tuple[Any, int]:
         ),
         HTTPStatus.OK,
     )
+
+
 @app.get("/api/presets")
 def list_presets() -> tuple[Any, int]:
     presets = image_store.list_presets()
@@ -590,7 +592,7 @@ def _resolve_selections(payload: dict[str, Any]) -> list[dict[str, Any]]:
     provider = str(payload.get("provider") or "openai").strip().lower()
     size = _optional_str(payload.get("size"))
     quality = _optional_str(payload.get("quality"))
-    steps = _parse_steps(payload.get("steps"), field_name="steps")
+    steps = _parse_positive_int(payload.get("steps"), field_name="steps")
     model = _optional_str(payload.get("model"))
     models = _parse_model_list(payload.get("models"))
     resolved_models = [model] if model else (models or [None])
@@ -620,7 +622,7 @@ def _parse_selection(raw_selection: Any, index: int) -> dict[str, Any]:
         "model": model_name,
         "size": _optional_str(raw_selection.get("size")),
         "quality": _optional_str(raw_selection.get("quality")),
-        "steps": _parse_steps(raw_selection.get("steps"), field_name=f"selections[{index - 1}].steps"),
+        "steps": _parse_positive_int(raw_selection.get("steps"), field_name=f"selections[{index - 1}].steps"),
         "use_reference_images": _optional_bool(raw_selection.get("use_reference_images"), default=True),
     }
 
@@ -641,21 +643,6 @@ def _optional_str(raw_value: Any) -> str | None:
         return None
     trimmed = str(raw_value).strip()
     return trimmed or None
-
-
-def _parse_steps(raw_value: Any, *, field_name: str) -> int | None:
-    if raw_value is None:
-        return None
-    raw_text = str(raw_value).strip()
-    if not raw_text:
-        return None
-    try:
-        steps = int(raw_text)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"Field '{field_name}' must be an integer") from exc
-    if steps <= 0:
-        raise ValueError(f"Field '{field_name}' must be greater than 0")
-    return steps
 
 
 def _parse_positive_int(raw_value: Any, *, field_name: str) -> int | None:
@@ -734,16 +721,6 @@ def _truncate_for_log(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return f"{text[:max_chars]}...(truncated)"
-
-
-def _provider_supports_image_edit(provider_name: str) -> bool:
-    provider_cls = provider_registry.names().get(provider_name)
-    if provider_cls is None:
-        return False
-    options = getattr(provider_cls, "OPTIONS", None)
-    if not isinstance(options, dict):
-        return False
-    return bool(options.get("supports_image_edit"))
 
 
 def _selection_supports_image_edit(provider_name: str, model_name: str | None) -> bool:

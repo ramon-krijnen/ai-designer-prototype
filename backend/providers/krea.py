@@ -405,11 +405,3 @@ class KreaImageProvider:
             raise ValueError("Krea trusted image host allowlist is empty")
 
         return hosts
-
-    def _ensure_trusted_download_host(self, host: str) -> None:
-        normalized_host = host.strip().lower()
-        if normalized_host not in self._trusted_download_hosts:
-            allowed_hosts = ", ".join(sorted(self._trusted_download_hosts))
-            raise RuntimeError(
-                f"Krea image URL host '{normalized_host}' is not trusted. Allowed hosts: {allowed_hosts}"
-            )

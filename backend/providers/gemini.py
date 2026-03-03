@@ -60,7 +60,6 @@ class GeminiImageProvider:
         api_key = (
             os.getenv("GEMINI_API_KEY")
             or os.getenv("AI_STUDIO_API_KEY")
-            or os.getenv("GEMIN_API_KEY")
             or os.getenv("GOOGLE_API_KEY")
             or os.getenv("GOOGLE_CLOUD_KEY")
             or os.getenv("GOOGLE_CLOUD_API_KEY")

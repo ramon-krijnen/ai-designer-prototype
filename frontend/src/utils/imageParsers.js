@@ -1,3 +1,20 @@
+export function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result !== 'string') {
+        reject(new Error(`Unable to read '${file.name}'.`))
+        return
+      }
+      resolve(reader.result)
+    }
+    reader.onerror = () => {
+      reject(new Error(`Unable to read '${file.name}'.`))
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
 function addBaseUrl(path, apiBaseUrl) {
   if (!apiBaseUrl) return path
   return `${apiBaseUrl}${path}`
