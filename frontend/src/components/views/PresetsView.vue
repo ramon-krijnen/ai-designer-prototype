@@ -31,6 +31,7 @@ function defaultForm() {
   return {
     mode: 'create',
     sourcePresetId: '',
+    name: '',
     promptingConfig: {
       systemPrompt: '',
       promptTemplate: '',
@@ -78,6 +79,7 @@ function buildPayload() {
     .filter(Boolean)
 
   const payload = {
+    name: String(form.value.name || '').trim() || undefined,
     promptingConfig: {
       systemPrompt: String(form.value.promptingConfig.systemPrompt || '').trim() || undefined,
       promptTemplate: form.value.promptingConfig.promptTemplate,
@@ -106,6 +108,7 @@ function populateFormFromPreset(preset) {
   form.value = {
     mode: 'edit',
     sourcePresetId: preset.id,
+    name: preset.name || '',
     promptingConfig: {
       systemPrompt: promptingConfig.systemPrompt || '',
       promptTemplate: promptingConfig.promptTemplate || '',
@@ -240,6 +243,37 @@ async function duplicateSelectedPreset() {
   }
 }
 
+async function renamePreset() {
+  if (!selectedPreset.value || isLoading.value) return
+  const name = String(form.value.name || '').trim()
+  if (!name) {
+    error.value = 'Name cannot be empty.'
+    return
+  }
+  if (name === selectedPreset.value.name) return
+  isLoading.value = true
+  error.value = ''
+  success.value = ''
+  try {
+    const response = await fetch(`${props.apiBaseUrl}/api/presets/${selectedPreset.value.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    const data = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      throw new Error(data.error || 'Failed to rename preset.')
+    }
+    await loadPresets()
+    selectedPresetId.value = data.id
+    success.value = `Renamed to '${name}'.`
+  } catch (renameError) {
+    error.value = renameError instanceof Error ? renameError.message : 'Failed to rename preset.'
+  } finally {
+    isLoading.value = false
+  }
+}
+
 function useSelectedPreset() {
   if (!selectedPreset.value?.id) return
   emit('use-preset', {
@@ -300,6 +334,20 @@ onMounted(async () => {
         <div class="action-row">
           <button type="button" class="secondary" :disabled="!selectedPreset || isLoading" @click="useSelectedPreset">Use In Generate</button>
           <button type="button" class="secondary" :disabled="!selectedPreset || isLoading" @click="duplicateSelectedPreset">Duplicate</button>
+        </div>
+      </div>
+
+      <div class="section-card">
+        <h3>Name</h3>
+        <div class="name-row">
+          <input v-model="form.name" :disabled="isLoading" placeholder="Preset name (auto-derived if blank)" />
+          <button
+            v-if="form.mode === 'edit'"
+            type="button"
+            class="secondary"
+            :disabled="isLoading || !form.name.trim() || form.name.trim() === selectedPreset?.name"
+            @click="renamePreset"
+          >Rename</button>
         </div>
       </div>
 
@@ -512,6 +560,16 @@ h3 {
   background:
     linear-gradient(165deg, rgba(255, 251, 244, 0.96), rgba(254, 247, 236, 0.98));
   margin-bottom: 0.75rem;
+}
+
+.name-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.name-row input {
+  flex: 1;
 }
 
 .section-head {

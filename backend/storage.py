@@ -754,6 +754,17 @@ class ImageStore:
             raise RuntimeError(f"Failed to create preset version for '{preset_id}'")
         return version
 
+    def update_preset_metadata(self, preset_id: str, *, name: str) -> dict[str, Any] | None:
+        now = datetime.now(UTC).isoformat()
+        with self._connect() as conn:
+            result = conn.execute(
+                "UPDATE presets SET name = ?, updated_at = ? WHERE id = ?",
+                (name, now, preset_id),
+            )
+            if result.rowcount == 0:
+                return None
+        return self.get_preset(preset_id)
+
     def duplicate_preset(
         self,
         source_preset_id: str,

@@ -258,6 +258,21 @@ def get_preset(preset_id: str) -> tuple[Any, int]:
     return jsonify(_serialize_preset(preset, latest_version, versions=versions)), HTTPStatus.OK
 
 
+@app.patch("/api/presets/<preset_id>")
+def update_preset(preset_id: str) -> tuple[Any, int]:
+    payload = request.get_json(silent=True) or {}
+    name = _optional_str(payload.get("name"))
+    if not name:
+        return jsonify({"error": "Field 'name' is required"}), HTTPStatus.BAD_REQUEST
+    if image_store.get_preset(preset_id) is None:
+        return jsonify({"error": "Preset not found"}), HTTPStatus.NOT_FOUND
+    updated = image_store.update_preset_metadata(preset_id, name=name)
+    if updated is None:
+        return jsonify({"error": "Preset not found"}), HTTPStatus.NOT_FOUND
+    latest_version = image_store.get_preset_version(preset_id)
+    return jsonify(_serialize_preset(updated, latest_version)), HTTPStatus.OK
+
+
 @app.post("/api/presets/<preset_id>/versions")
 def create_preset_version(preset_id: str) -> tuple[Any, int]:
     payload = request.get_json(silent=True) or {}
