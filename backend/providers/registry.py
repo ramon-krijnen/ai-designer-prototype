@@ -6,6 +6,7 @@ from providers.base import ImageProvider
 from providers.gemini import GeminiImageProvider
 from providers.krea import KreaImageProvider
 from providers.openai import OpenAIImageProvider
+from providers.qwen import QwenImageProvider
 
 
 class ProviderRegistry:
@@ -14,6 +15,7 @@ class ProviderRegistry:
             "openai": OpenAIImageProvider,
             "krea": KreaImageProvider,
             "gemini": GeminiImageProvider,
+            "qwen": QwenImageProvider,
         }
 
     def get(self, name: str) -> ImageProvider:

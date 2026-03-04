@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 import os
 import re
 import threading
@@ -11,6 +12,8 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Any
 from uuid import uuid4
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 from flask import Flask, g, jsonify, request, send_file, url_for
 from providers.base import ImageGenerationRequest, InputImage
@@ -417,6 +420,13 @@ def generate_krea_image() -> tuple[Any, int]:
 def generate_gemini_image() -> tuple[Any, int]:
     payload = request.get_json(silent=True) or {}
     payload["provider"] = "gemini"
+    return _start_async_generation(payload)
+
+
+@app.post("/api/images/qwen")
+def generate_qwen_image() -> tuple[Any, int]:
+    payload = request.get_json(silent=True) or {}
+    payload["provider"] = "qwen"
     return _start_async_generation(payload)
 
 

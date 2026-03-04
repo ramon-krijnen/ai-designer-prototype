@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import time
 from uuid import uuid4
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+logger = logging.getLogger(__name__)
 
 from providers.base import ImageGenerationRequest, ImageGenerationResult, InputImage
 
@@ -66,7 +69,11 @@ class KreaImageProvider:
             body["height"] = height
             size_label = f"{width}x{height}"
             if request.reference_images:
-                body["imageUrl"] = self._upload_asset(request.reference_images[0])
+                image_url = self._upload_asset(request.reference_images[0])
+                logger.info("krea z-image: uploaded reference image → %s", image_url)
+                body["imageUrl"] = image_url
+            else:
+                logger.info("krea z-image: no reference images provided, generating text-to-image")
 
         if model_path in {"bfl/flux-1-dev", "bfl/flux-1-kontext-dev"}:
             width, height = self._resolve_dimensions(request.size)
@@ -78,6 +85,8 @@ class KreaImageProvider:
                 body["imageUrl"] = self._upload_asset(request.reference_images[0])
 
         endpoint = f"{self._base_url}/generate/image/{model_path}"
+        log_body = {k: (v if k != "imageUrl" else f"<url: {v}>") for k, v in body.items()}
+        logger.info("krea generate: POST %s body=%s", endpoint, json.dumps(log_body))
         payload = self._resolve_generation_payload(endpoint, body)
         image_base64 = self._extract_image_base64(payload)
 
@@ -221,6 +230,7 @@ class KreaImageProvider:
             raise RuntimeError("Krea asset upload returned an unexpected payload")
 
         image_url = payload.get("imageUrl") or payload.get("image_url") or payload.get("url")
+        logger.info("krea asset upload response keys=%s image_url=%s", list(payload.keys()), image_url)
         if not isinstance(image_url, str) or not image_url.strip():
             raise RuntimeError("Krea asset upload did not return an image URL")
         return image_url.strip()
